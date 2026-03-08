@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from youtube_transcript_api import YouTubeTranscriptApi
 import subprocess
 import uvicorn
-import re
 import os
 
 
@@ -31,7 +30,6 @@ async def get_transcript(url: str):
         ytt_api = YouTubeTranscriptApi()
         fetched = ytt_api.fetch(video_id, languages=['id', 'en'])
 
-        # Format dengan timestamp HH:MM:SS agar AI tahu posisi waktu
         def seconds_to_hhmmss(seconds):
             h = int(seconds // 3600)
             m = int((seconds % 3600) // 60)
@@ -44,20 +42,22 @@ async def get_transcript(url: str):
             formatted_lines.append(f"[{timestamp}] {snippet.text}")
 
         full_text = "\n".join(formatted_lines)
-
         return {"transcript": full_text}
 
     except Exception as e:
         return {"error": f"Gagal total: {str(e)}"}
 
+
 def cut_video_task(url: str, start: str, end: str):
     timestamp = start.replace(':', '')
-    tmp_yt = f"/tmp/yt_clip_{timestamp}.mp4"
-    output_final = f"/home/iqbal/Downloads/clip/final_tiktok_{timestamp}.mp4"
+    tmp_yt     = f"/tmp/yt_clip_{timestamp}.mp4"
+    tmp_merged = f"/tmp/merged_{timestamp}.mp4"
+    output     = f"/home/iqbal/Downloads/clip/final_tiktok_{timestamp}.mp4"
     video_game_pop = "./pob1.mp4"
 
     try:
-        # Step 1: Download potongan kecil dulu
+        # Step 1: Download clip YouTube
+        print(f"⬇️ Downloading clip {start} - {end}...")
         subprocess.run([
             "yt-dlp",
             "--download-sections", f"*{start}-{end}",
@@ -67,20 +67,20 @@ def cut_video_task(url: str, start: str, end: str):
             url
         ], check=True)
 
-        # Step 2: Hitung durasi YT clip secara otomatis
-        probe = subprocess.check_output([
+        # Step 2: Hitung durasi
+        duration = float(subprocess.check_output([
             "ffprobe", "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             tmp_yt
-        ]).decode().strip()
-        duration = float(probe)
-        print(f"⏱ Durasi clip: {duration} detik")
+        ]).decode().strip())
+        print(f"⏱ Durasi clip: {duration:.1f} detik")
 
-        # Step 3: Gabung — video game dipotong tepat sesuai durasi YT
-        ffmpeg_cmd = [
+        # Step 3: Gabung video YT + video game ke file tmp
+        print("🎬 Menggabungkan video...")
+        subprocess.run([
             "ffmpeg", "-i", tmp_yt,
-            "-stream_loop", "-1", "-t", str(duration), "-i", video_game_pop,  # 👈 game dibatasi durasi YT
+            "-stream_loop", "-1", "-t", str(duration), "-i", video_game_pop,
             "-filter_complex",
             "[0:v]scale=1080:960:force_original_aspect_ratio=increase,"
             "crop=1080:960,setsar=1[top];"
@@ -90,21 +90,52 @@ def cut_video_task(url: str, start: str, end: str):
             "-map", "[v]", "-map", "0:a?",
             "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
             "-c:a", "aac", "-b:a", "128k",
-            output_final, "-y"
-        ]
-        subprocess.run(ffmpeg_cmd, check=True)
-        print(f"✅ Selesai! Cek: {output_final}")
+            tmp_merged, "-y"
+        ], check=True)
+
+        # Step 4: Cek ukuran hasil merge
+        size_mb = os.path.getsize(tmp_merged) / (1024 * 1024)
+        print(f"📊 Ukuran setelah merge: {size_mb:.1f}MB")
+
+        if size_mb > 45:
+            # Compress langsung ke output final, hapus tmp_merged sesudahnya
+            print(f"⚠️ Terlalu besar ({size_mb:.1f}MB), compressing ke <45MB...")
+            video_bitrate = max(int((45 * 1024 * 8) / duration) - 96, 300)
+            subprocess.run([
+                "ffmpeg", "-i", tmp_merged,
+                "-b:v", f"{video_bitrate}k",
+                "-maxrate", f"{video_bitrate}k",
+                "-bufsize", f"{video_bitrate * 2}k",
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-c:a", "aac", "-b:a", "96k",
+                output, "-y"
+            ], check=True)
+            os.remove(tmp_merged)  # Hapus tmp_merged setelah compress
+        else:
+            # Ukuran aman, rename langsung jadi output final
+            os.rename(tmp_merged, output)
+            print(f"✅ Ukuran aman, tidak perlu compress")
+
+        final_size = os.path.getsize(output) / (1024 * 1024)
+        print(f"✅ Selesai! File: {output} ({final_size:.1f}MB)")
 
     except Exception as e:
         print(f"❌ Gagal: {e}")
     finally:
-        if os.path.exists(tmp_yt):
-            os.remove(tmp_yt)
-    print(f"DONE_PROCESSING:{output_final}")
+        # Bersihkan semua file temporary
+        for f in [tmp_yt, tmp_merged]:
+            if os.path.exists(f):
+                os.remove(f)
+                print(f"🗑️ Hapus temp: {f}")
+
+    print(f"DONE_PROCESSING:{output}")
+
+
 @app.post("/cut")
 async def cut_video(request: ClipRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(cut_video_task, request.url, request.start, request.end)
     return {"status": "Processing in background"}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
