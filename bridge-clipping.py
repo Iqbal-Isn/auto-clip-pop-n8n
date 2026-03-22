@@ -5,8 +5,9 @@ import subprocess
 import uvicorn
 import os
 
-
 app = FastAPI()
+
+COOKIES_PATH = "./youtube_cookies.txt"
 
 class ClipRequest(BaseModel):
     url: str
@@ -25,13 +26,29 @@ def seconds_to_hhmmss(seconds):
     s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
+def extract_video_id(url: str):
+    if "v=" in url:
+        return url.split("v=")[1].split("&")[0]
+    elif "youtu.be/" in url:
+        return url.split("youtu.be/")[1].split("?")[0]
+    elif "/live/" in url:
+        return url.split("/live/")[1].split("?")[0]
+    return None
+
+def yt_dlp_cmd():
+    """Return base yt-dlp command, dengan cookies jika file tersedia"""
+    cmd = ["yt-dlp"]
+    if os.path.exists(COOKIES_PATH):
+        cmd += ["--cookies", COOKIES_PATH]
+        print("🍪 Menggunakan cookies YouTube")
+    return cmd
+
 
 # ─────────────────────────────────────────
 # FACECAM CROP (pojok kiri bawah)
 # ─────────────────────────────────────────
 
 def get_facecam_crop(video_path: str):
-    """Hardcode posisi facecam pojok kiri bawah"""
     result = subprocess.check_output([
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -44,7 +61,6 @@ def get_facecam_crop(video_path: str):
     vid_h = int(result[1])
     print(f"📐 Video: {vid_w}x{vid_h}")
 
-    # Facecam: ~30% lebar, ~35% tinggi, pojok kiri bawah
     cam_w = int(vid_w * 0.30)
     cam_h = int(vid_h * 0.35)
     cam_x = 0
@@ -61,14 +77,7 @@ def get_facecam_crop(video_path: str):
 @app.get("/transcript")
 async def get_transcript(url: str):
     try:
-        video_id = None
-        if "v=" in url:
-            video_id = url.split("v=")[1].split("&")[0]
-        elif "youtu.be/" in url:
-            video_id = url.split("youtu.be/")[1].split("?")[0]
-        elif "/live/" in url:
-            video_id = url.split("/live/")[1].split("?")[0]
-
+        video_id = extract_video_id(url)
         if not video_id:
             return {"error": "Video ID tidak ditemukan"}
 
@@ -80,8 +89,7 @@ async def get_transcript(url: str):
             timestamp = seconds_to_hhmmss(snippet.start)
             formatted_lines.append(f"[{timestamp}] {snippet.text}")
 
-        full_text = "\n".join(formatted_lines)
-        return {"transcript": full_text}
+        return {"transcript": "\n".join(formatted_lines)}
 
     except Exception as e:
         return {"error": f"Gagal total: {str(e)}"}
@@ -97,27 +105,28 @@ def cut_video_task(url: str, start: str, end: str, mode: str = "normal"):
     tmp_h264   = f"/tmp/yt_h264_{timestamp}.mp4"
     tmp_merged = f"/tmp/merged_{timestamp}.mp4"
     output     = f"/home/iqbal/Downloads/clip/final_tiktok_{timestamp}.mp4"
-    video_game_pop = "./pobmarcel.mp4"
+    video_game_pop = "./popskin.mp4"
 
     print(f"🎬 Mode: {mode.upper()}")
 
     try:
         # Step 1: Download clip YouTube
         print(f"⬇️ Downloading clip {start} - {end}...")
-        subprocess.run([
-            "yt-dlp",
-            "--download-sections", f"*{start}-{end}",
-            "-f", "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]",
-            "--merge-output-format", "mp4",
-            "-o", tmp_yt,
-            url
-        ], check=True)
+        subprocess.run(
+            yt_dlp_cmd() + [
+                "--download-sections", f"*{start}-{end}",
+                "-f", "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]",
+                "--merge-output-format", "mp4",
+                "-o", tmp_yt,
+                url
+            ], check=True
+        )
 
-        # Step 2: Convert ke h264 agar bisa di-crop ffmpeg
+        # Step 2: Convert ke h264
         print("🔄 Convert ke h264...")
         subprocess.run([
             "ffmpeg", "-i", tmp_yt,
-            "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
+            "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
             "-c:a", "aac", "-b:a", "128k",
             tmp_h264, "-y"
         ], check=True)
@@ -132,37 +141,48 @@ def cut_video_task(url: str, start: str, end: str, mode: str = "normal"):
         ]).decode().strip())
         print(f"⏱ Durasi clip: {duration:.1f} detik")
 
-        # Step 4: Tentukan filter berdasarkan mode
+        # Step 4: Tentukan video filter berdasarkan mode
         if mode.lower() == "gaming":
-            print("🎮 Mode GAMING — crop facecam pojok kiri bawah...")
+            print("🎮 Mode GAMING — facecam atas, full screen bawah...")
             cx, cy, cw, ch = get_facecam_crop(tmp_h264)
-            top_filter = (
+            video_filter = (
                 f"[0:v]crop={cw}:{ch}:{cx}:{cy},"
                 f"scale=1080:960:force_original_aspect_ratio=increase,"
-                f"crop=1080:960,setsar=1[top]"
+                f"crop=1080:960,setsar=1[top];"
+                f"[0:v]scale=1080:960:force_original_aspect_ratio=increase,"
+                f"crop=1080:960,setsar=1[bottom];"
+                f"[top][bottom]vstack=inputs=2[v]"
             )
+            ffmpeg_cmd = [
+                "ffmpeg", "-i", tmp_h264,
+                "-filter_complex", video_filter,
+                "-map", "[v]", "-map", "0:a?",
+                "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
+                "-c:a", "aac", "-b:a", "128k",
+                tmp_merged, "-y"
+            ]
         else:
-            print("📺 Mode NORMAL — pakai full video...")
-            top_filter = (
+            print("📺 Mode NORMAL — full video atas, POB bawah...")
+            video_filter = (
                 "[0:v]scale=1080:960:force_original_aspect_ratio=increase,"
-                "crop=1080:960,setsar=1[top]"
+                "crop=1080:960,setsar=1[top];"
+                "[1:v]scale=1080:960:force_original_aspect_ratio=increase,"
+                "crop=1080:960,setsar=1[bottom];"
+                "[top][bottom]vstack=inputs=2[v]"
             )
+            ffmpeg_cmd = [
+                "ffmpeg", "-i", tmp_h264,
+                "-stream_loop", "-1", "-t", str(duration), "-i", video_game_pop,
+                "-filter_complex", video_filter,
+                "-map", "[v]", "-map", "0:a?",
+                "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
+                "-c:a", "aac", "-b:a", "128k",
+                tmp_merged, "-y"
+            ]
 
-        # Step 5: Gabung video atas + video game bawah
+        # Step 5: Jalankan ffmpeg
         print("🎬 Menggabungkan video...")
-        subprocess.run([
-            "ffmpeg", "-i", tmp_h264,
-            "-stream_loop", "-1", "-t", str(duration), "-i", video_game_pop,
-            "-filter_complex",
-            f"{top_filter};"
-            "[1:v]scale=1080:960:force_original_aspect_ratio=increase,"
-            "crop=1080:960,setsar=1[bottom];"
-            "[top][bottom]vstack=inputs=2[v]",
-            "-map", "[v]", "-map", "0:a?",
-            "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
-            "-c:a", "aac", "-b:a", "128k",
-            tmp_merged, "-y"
-        ], check=True)
+        subprocess.run(ffmpeg_cmd, check=True)
 
         # Step 6: Cek ukuran, compress jika perlu
         size_mb = os.path.getsize(tmp_merged) / (1024 * 1024)
