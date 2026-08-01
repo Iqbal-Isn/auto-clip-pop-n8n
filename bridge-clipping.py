@@ -39,6 +39,11 @@ class ClipRequest(BaseModel):
     end: str
     mode: str = "normal"  # "normal" atau "gaming"
 
+class BatchClipRequest(BaseModel):
+    url: str
+    clips: list[dict]  # [{"start": "HH:MM:SS", "end": "HH:MM:SS"}, ...]
+    mode: str = "normal"
+
 
 # ─────────────────────────────────────────
 # HELPER
@@ -113,7 +118,7 @@ def create_ass_word_by_word(entries, clip_start_sec, clip_end_sec, width=1080, h
         " OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut,"
         " ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow,"
         " Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        "Style: Default,Arial,20,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,"
+        "Style: Default,Google Sans,48,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,"
         "1,0,0,0,100,100,0,0,1,2.5,1,2,10,10,30,1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -211,7 +216,7 @@ def create_ass_from_whisper(words, width=1080, height=1080):
         " OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut,"
         " ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow,"
         " Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        "Style: Default,Arial,20,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,"
+        "Style: Default,Google Sans,48,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,"
         "1,0,0,0,100,100,0,0,1,2.5,1,2,10,10,30,1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -347,189 +352,308 @@ async def get_transcript(url: str):
 
 
 # ─────────────────────────────────────────
-# VIDEO CUTTING
+# VIDEO CUTTING — INTERNAL HELPERS
 # ─────────────────────────────────────────
 
-def cut_video_task(url: str, start: str, end: str, mode: str = "normal"):
-    timestamp = start.replace(':', '')
-    tmp_yt     = os.path.join(TMP_DIR, f"yt_clip_{timestamp}.mp4")
-    tmp_h264   = os.path.join(TMP_DIR, f"yt_h264_{timestamp}.mp4")
-    tmp_merged = os.path.join(TMP_DIR, f"merged_{timestamp}.mp4")
-    tmp_audio  = os.path.join(TMP_DIR, f"audio_{timestamp}.wav")
-    output     = os.path.join(OUTPUT_DIR, f"final_tiktok_{timestamp}.mp4")
+def _download_video_section(url: str, start_sec: float, end_sec: float, tag: str) -> str:
+    """
+    Download satu section YouTube.
+    Return path ke file hasil download (codec asli YouTube).
+    """
+    start_str = seconds_to_hhmmss(start_sec)
+    end_str = seconds_to_hhmmss(end_sec)
 
-    print(f"🎬 Mode: {mode.upper()}")
+    tmp_yt = os.path.join(TMP_DIR, f"yt_dl_{tag}.mp4")
 
+    print(f"⬇️ Downloading {start_str} - {end_str} ({tag})...")
+    subprocess.run(
+        yt_dlp_cmd() + [
+            "--download-sections", f"*{start_str}-{end_str}",
+            "-f", "best[height<=1080]+bestaudio/best[height<=720]+bestaudio/best",
+            "--merge-output-format", "mp4",
+            "-o", tmp_yt,
+            url
+        ], check=True
+    )
+
+    print(f"✅ Download selesai: {tmp_yt}")
+    return tmp_yt
+
+
+def _whisper_subtitle(video_path: str, prefix: str) -> str | None:
+    """
+    Extract audio, transcribe dengan Whisper, generate ASS subtitle.
+    Return path ke file ASS atau None jika gagal.
+    """
+    tmp_audio = os.path.join(TMP_DIR, f"audio_{prefix}.wav")
     try:
-        # Step 1: Download clip YouTube
-        print(f"⬇️ Downloading clip {start} - {end}...")
-        subprocess.run(
-            yt_dlp_cmd() + [
-                "--download-sections", f"*{start}-{end}",
-                "-f", "best[height<=1080]/best[height<=720]/best",
-                "--merge-output-format", "mp4",
-                "-o", tmp_yt,
-                url
-            ], check=True
-        )
-
-        # Step 2: Convert ke h264
-        print("🔄 Convert ke h264...")
+        print(f"🔉 Extract audio ({prefix})...")
         subprocess.run([
-            FFMPEG_EXE, "-i", tmp_yt,
-            "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
-            "-c:a", "aac", "-b:a", "128k",
-            tmp_h264, "-y"
+            FFMPEG_EXE, "-i", video_path, "-vn",
+            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            tmp_audio, "-y"
         ], check=True)
-        os.remove(tmp_yt)
 
-        # Step 3: Hitung durasi
+        print(f"🔊 Whisper transcribe ({prefix})...")
+        words = transcribe_audio(tmp_audio)
+        print(f"📝 Whisper: {len(words)} kata terdeteksi")
+
+        ass_content = create_ass_from_whisper(words)
+        if ass_content:
+            srt_file = os.path.join(TMP_DIR, f"sub_{prefix}.ass")
+            with open(srt_file, 'w', encoding='utf-8') as f:
+                f.write(ass_content)
+            baris = sum(1 for l in ass_content.split('\n') if l.startswith('Dialogue:'))
+            print(f"📝 Subtitle: {baris} entries")
+            return srt_file
+    except Exception as e:
+        print(f"⚠️ Gagal Whisper subtitle: {e}")
+    finally:
+        if os.path.exists(tmp_audio):
+            os.remove(tmp_audio)
+    return None
+
+
+def _apply_tiktok_filter(video_path: str, srt_file: str | None,
+                         mode: str, prefix: str) -> str:
+    """
+    Apply TikTok filter (gaming/normal) + subtitle burn-in.
+    Return path ke file hasil filter (tmp_merged).
+    """
+    tmp_merged = os.path.join(TMP_DIR, f"merged_{prefix}.mp4")
+
+    sub_chain = ""
+    if srt_file:
+        srt_escaped = srt_file.replace('\\', '/').replace(':', '\\:')
+        sub_chain = f"ass='{srt_escaped}'"
+
+    if mode.lower() == "gaming":
+        print(f"🎮 Mode GAMING ({prefix}) — facecam atas, full screen bawah...")
+        cx, cy, cw, ch = get_facecam_crop(video_path)
+        if srt_file:
+            video_filter = (
+                f"[0:v]{sub_chain}[subbed];"
+                f"[subbed]crop={cw}:{ch}:{cx}:{cy},"
+                f"scale=1080:960:force_original_aspect_ratio=increase,"
+                f"crop=1080:960,setsar=1[top];"
+                f"[subbed]scale=1080:960:force_original_aspect_ratio=increase,"
+                f"crop=1080:960,setsar=1[bottom];"
+                f"[top][bottom]vstack=inputs=2[v]"
+            )
+        else:
+            video_filter = (
+                f"[0:v]crop={cw}:{ch}:{cx}:{cy},"
+                f"scale=1080:960:force_original_aspect_ratio=increase,"
+                f"crop=1080:960,setsar=1[top];"
+                f"[0:v]scale=1080:960:force_original_aspect_ratio=increase,"
+                f"crop=1080:960,setsar=1[bottom];"
+                f"[top][bottom]vstack=inputs=2[v]"
+            )
+    else:
+        print(f"📺 Mode NORMAL ({prefix}) — blur background + foreground + subtitle...")
+        if srt_file:
+            video_filter = (
+                "[0:v]split[orig_raw][bg];"
+                "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=15:15[blurred];"
+                f"[orig_raw]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080[scaled];"
+                f"[scaled]{sub_chain}[fg];"
+                "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
+            )
+        else:
+            video_filter = (
+                "[0:v]split[orig][bg];"
+                "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=15:15[blurred];"
+                "[orig]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080[fg];"
+                "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
+            )
+
+    subprocess.run([
+        FFMPEG_EXE, "-i", video_path,
+        "-filter_complex", video_filter,
+        "-map", "[v]", "-map", "0:a?",
+        "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+        "-c:a", "aac", "-b:a", "128k",
+        tmp_merged, "-y"
+    ], check=True)
+
+    return tmp_merged
+
+
+def _compress_to_target(source: str, output: str, target_mb: float = 45):
+    """
+    Cek ukuran file. Jika > target_mb, compress ulang.
+    Jika tidak, rename/move ke output.
+    """
+    size_mb = os.path.getsize(source) / (1024 * 1024)
+    print(f"📊 Ukuran: {size_mb:.1f}MB")
+
+    if size_mb > target_mb:
         duration = float(subprocess.check_output([
             FFPROBE_EXE, "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
-            tmp_h264
+            source
         ]).decode().strip())
-        print(f"⏱ Durasi clip: {duration:.1f} detik")
 
-        # Step 3.5: Whisper — transcribe audio clip ke word-level subtitle
-        srt_file = None
-        try:
-            # Extract audio dari clip
-            print("🔉 Extract audio...")
-            subprocess.run([
-                FFMPEG_EXE, "-i", tmp_h264, "-vn",
-                "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-                tmp_audio, "-y"
-            ], check=True)
+        print(f"⚠️ Terlalu besar ({size_mb:.1f}MB), compressing ke <{target_mb}MB...")
+        video_bitrate = max(int((target_mb * 1024 * 8) / duration) - 128, 2000)
+        subprocess.run([
+            FFMPEG_EXE, "-i", source,
+            "-b:v", f"{video_bitrate}k",
+            "-maxrate", f"{video_bitrate}k",
+            "-bufsize", f"{video_bitrate * 2}k",
+            "-c:v", "libx264", "-preset", "fast",
+            "-c:a", "aac", "-b:a", "96k",
+            output, "-y"
+        ], check=True)
+    else:
+        if source != output:
+            os.rename(source, output)
+        print(f"✅ Ukuran aman, tidak perlu compress")
 
-            # Transcribe pakai Whisper
-            print("🔊 Whisper transcribe...")
-            words = transcribe_audio(tmp_audio)
-            print(f"📝 Whisper: {len(words)} kata terdeteksi")
+    final_size = os.path.getsize(output) / (1024 * 1024)
+    print(f"✅ Selesai! File: {output} ({final_size:.1f}MB)")
+    return final_size
 
-            # Generate ASS subtitle
-            ass_content = create_ass_from_whisper(words)
-            if ass_content:
-                srt_file = os.path.join(TMP_DIR, f"sub_{timestamp}.ass")
-                with open(srt_file, 'w', encoding='utf-8') as f:
-                    f.write(ass_content)
-                baris = sum(1 for l in ass_content.split('\n') if l.startswith('Dialogue:'))
-                print(f"📝 Subtitle: {baris} entries")
-        except Exception as e:
-            print(f"⚠️ Gagal Whisper subtitle: {e}")
 
-        # Step 4: Proses berdasarkan mode
-        sub_chain = ""
-        if srt_file:
-            srt_escaped = srt_file.replace('\\', '/').replace(':', '\\:')
-            sub_chain = f"ass='{srt_escaped}'"
+def _process_single_clip_full(url: str, start_str: str, end_str: str,
+                              mode: str, clip_idx: int) -> dict:
+    """
+    Download section spesifik + proses satu klip.
+    Setiap klip download section-nya sendiri (bukan full range)
+    agar tidak membuang waktu download bagian yang tidak diperlukan.
+    """
+    start_sec = hhmmss_to_seconds(start_str)
+    end_sec = hhmmss_to_seconds(end_str)
+    prefix = f"{start_str.replace(':', '')}_{clip_idx}"
+    output = os.path.join(OUTPUT_DIR, f"final_tiktok_{prefix}.mp4")
 
-        if mode.lower() == "gaming":
-            print("🎮 Mode GAMING — facecam atas, full screen bawah...")
-            cx, cy, cw, ch = get_facecam_crop(tmp_h264)
-            if srt_file:
-                video_filter = (
-                    f"[0:v]{sub_chain}[subbed];"
-                    f"[subbed]crop={cw}:{ch}:{cx}:{cy},"
-                    f"scale=1080:960:force_original_aspect_ratio=increase,"
-                    f"crop=1080:960,setsar=1[top];"
-                    f"[subbed]scale=1080:960:force_original_aspect_ratio=increase,"
-                    f"crop=1080:960,setsar=1[bottom];"
-                    f"[top][bottom]vstack=inputs=2[v]"
-                )
-            else:
-                video_filter = (
-                    f"[0:v]crop={cw}:{ch}:{cx}:{cy},"
-                    f"scale=1080:960:force_original_aspect_ratio=increase,"
-                    f"crop=1080:960,setsar=1[top];"
-                    f"[0:v]scale=1080:960:force_original_aspect_ratio=increase,"
-                    f"crop=1080:960,setsar=1[bottom];"
-                    f"[top][bottom]vstack=inputs=2[v]"
-                )
-            subprocess.run([
-                FFMPEG_EXE, "-i", tmp_h264,
-                "-filter_complex", video_filter,
-                "-map", "[v]", "-map", "0:a?",
-                "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
-                "-c:a", "aac", "-b:a", "128k",
-                tmp_merged, "-y"
-            ], check=True)
-            final_source = tmp_merged
-        else:
-            print("📺 Mode NORMAL — blur background + foreground + subtitle...")
-            # Canvas 1080x1920 (9:16 TikTok/Reels)
-            # Background: video diperbesar + blur penuhi layar
-            # Foreground: video 1:1 di tengah, jernih + subtitle
-            if srt_file:
-                video_filter = (
-                    "[0:v]split[orig_raw][bg];"
-                    "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=15:15[blurred];"
-                    f"[orig_raw]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080[scaled];"
-                    f"[scaled]{sub_chain}[fg];"
-                    "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
-                )
-            else:
-                video_filter = (
-                    "[0:v]split[orig][bg];"
-                    "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=15:15[blurred];"
-                    "[orig]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080[fg];"
-                    "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
-                )
-            subprocess.run([
-                FFMPEG_EXE, "-i", tmp_h264,
-                "-filter_complex", video_filter,
-                "-map", "[v]", "-map", "0:a?",
-                "-c:v", "libx264", "-crf", "28", "-preset", "ultrafast",
-                "-c:a", "aac", "-b:a", "128k",
-                tmp_merged, "-y"
-            ], check=True)
-            final_source = tmp_merged
+    source_h264 = None
+    tmp_merged = None
+    srt_file = None
 
-        # Step 5: Cek ukuran, compress jika perlu
-        size_mb = os.path.getsize(final_source) / (1024 * 1024)
-        print(f"📊 Ukuran: {size_mb:.1f}MB")
+    try:
+        # Step 1: Download section spesifik klip ini saja (30-60 detik)
+        source_h264 = _download_video_section(url, start_sec, end_sec, prefix)
 
-        if size_mb > 45:
-            print(f"⚠️ Terlalu besar ({size_mb:.1f}MB), compressing ke <45MB...")
-            video_bitrate = max(int((45 * 1024 * 8) / duration) - 96, 300)
-            subprocess.run([
-                FFMPEG_EXE, "-i", final_source,
-                "-b:v", f"{video_bitrate}k",
-                "-maxrate", f"{video_bitrate}k",
-                "-bufsize", f"{video_bitrate * 2}k",
-                "-c:v", "libx264", "-preset", "ultrafast",
-                "-c:a", "aac", "-b:a", "96k",
-                output, "-y"
-            ], check=True)
-        else:
-            os.rename(final_source, output)
-            print(f"✅ Ukuran aman, tidak perlu compress")
+        # Step 2: Whisper subtitle
+        srt_file = _whisper_subtitle(source_h264, prefix)
 
-        final_size = os.path.getsize(output) / (1024 * 1024)
-        print(f"✅ Selesai! File: {output} ({final_size:.1f}MB)")
+        # Step 3: TikTok filter
+        tmp_merged = _apply_tiktok_filter(source_h264, srt_file, mode, prefix)
 
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+        # Step 4: Compress if needed
+        final_size = _compress_to_target(tmp_merged, output)
+
+        return {
+            "file": os.path.basename(output),
+            "size_mb": round(final_size, 1),
+            "mode": mode
+        }
+
     finally:
-        for f in [tmp_yt, tmp_h264, tmp_merged, tmp_audio, srt_file]:
+        # Cleanup temp files
+        for f in [source_h264, tmp_merged, srt_file]:
             if f and os.path.exists(f):
                 os.remove(f)
                 print(f"🗑️ Hapus temp: {f}")
 
-    final_size = os.path.getsize(output) / (1024 * 1024)
-    return {
-        "status": "done",
-        "file": os.path.basename(output),
-        "size_mb": round(final_size, 1),
-        "mode": mode
-    }
+
+def _cut_video_impl(url: str, segments: list[dict], mode: str = "normal") -> list[dict]:
+    """
+    Core implementation:
+    Proses setiap klip secara sequential — download section spesifik per klip.
+    Ini menghindari download range besar yang tidak perlu.
+    Keuntungan batch endpoint: satu HTTP call, error isolation, clean response.
+    """
+    if not segments:
+        return []
+
+    print(f"\n{'='*50}")
+    print(f"🎬 BATCH PROCESSING: {len(segments)} klip")
+    print(f"📐 Mode: {mode.upper()}")
+    for i, seg in enumerate(segments):
+        print(f"  Klip #{i+1}: {seg['start']} → {seg['end']}")
+    print(f"{'='*50}\n")
+
+    results = []
+    for i, seg in enumerate(segments):
+        print(f"\n{'─'*40}")
+        print(f"🎯 Klip #{i+1}: {seg['start']} → {seg['end']}")
+        print(f"{'─'*40}")
+
+        try:
+            result = _process_single_clip_full(
+                url, seg["start"], seg["end"], mode, i
+            )
+            result["status"] = "success"
+            results.append(result)
+        except Exception as e:
+            print(f"❌ Klip #{i+1} GAGAL: {e}")
+            results.append({
+                "status": "error",
+                "file": None,
+                "size_mb": 0,
+                "mode": mode,
+                "error": str(e)
+            })
+
+    return results
+
+
+# ─────────────────────────────────────────
+# ENDPOINTS
+# ─────────────────────────────────────────
+
+def cut_video_task(url: str, start: str, end: str, mode: str = "normal"):
+    """Single clip — kompatibilitas backward"""
+    segments = [{"start": start, "end": end}]
+    results = _cut_video_impl(url, segments, mode)
+    if results and results[0].get("status") == "error":
+        return {"status": "error", "message": results[0].get("error", "Unknown error")}
+    return results[0] if results else {"status": "error", "message": "No results"}
 
 
 @app.post("/cut")
 async def cut_video(request: ClipRequest):
     result = cut_video_task(request.url, request.start, request.end, request.mode)
     return result
+
+
+@app.post("/cut-batch")
+async def cut_video_batch(request: BatchClipRequest):
+    """
+    Endpoint batch: download video SEKALI, potong semua klip.
+    Request body:
+    {
+      "url": "https://youtube.com/watch?v=xxx",
+      "clips": [
+        {"start": "00:01:30", "end": "00:02:00"},
+        {"start": "00:05:10", "end": "00:05:50"}
+      ],
+      "mode": "normal"
+    }
+    Response:
+    {
+      "status": "done",
+      "clips": [
+        {"file": "final_tiktok_000130_0.mp4", "size_mb": 8.5, "status": "success"},
+        {"file": null, "size_mb": 0, "status": "error", "error": "..."}
+      ]
+    }
+    """
+    results = _cut_video_impl(request.url, request.clips, request.mode)
+
+    success_count = sum(1 for r in results if r.get("status") == "success")
+    fail_count = sum(1 for r in results if r.get("status") == "error")
+
+    return {
+        "status": "done",
+        "total": len(results),
+        "success": success_count,
+        "failed": fail_count,
+        "clips": results
+    }
 
 
 if __name__ == "__main__":

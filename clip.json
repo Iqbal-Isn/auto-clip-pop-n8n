@@ -1,0 +1,543 @@
+{
+  "name": "clip",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {
+          "responseKey": "={\"success\": \"Success\", \"message\": \"Congratstulation, you have access to AI Automation\"}"
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [2720, 48],
+      "id": "d9836f32-7aa8-44a0-a5a0-9ae439230280",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Kamu adalah editor video TikTok profesional Indonesia yang ahli mencari konten viral dan menghasilkan jutaan views.\n\nAnalisis transkrip berikut dan temukan 3 momen TERBAIK yang memiliki potensi viral tinggi di TikTok/Reels.\n\nTranskrip (format [HH:MM:SS] teks):\n{{ $json.transcript }}\n\nKriteria momen yang dicari (prioritas tertinggi ke terendah):\n1. 🤣 KOCAK/LUCU — candaan spontan, roasting, lawakan tidak terduga, reaksi konyol, momen cringe yang menghibur\n2. 😱 HEBOH — teriakan, kepanikan, reaksi ekstrem, momen mengejutkan, plot twist tidak terduga\n3. 🔥 SENGGOL-MENYENGGOL — sindiran halus maupun terang-terangan, ledek-ledekan, bully teman sendiri, drama kecil yang seru\n4. 💣 KONTROVERSIAL — pendapat berani, pernyataan mengejutkan, pengakuan menggelitik, debat sengit, hot takes\n5. 💕 ROMANTIS/BAPER — momen mesra, godaan, interaksi yang bikin baper, chemistry yang terasa, ungkapan perasaan\n\n\nAturan Ketat:\n1. Nilai start dan end HARUS disalin PERSIS dari timestamp [HH:MM:SS] yang ada di transkrip.\n2. DILARANG mengarang atau mengira-ngira waktu — gunakan HANYA timestamp yang tertulis.\n3. Durasi tiap momen wajib 30-60 detik.\n4. Pilih momen yang PUNYA KONTEKS LENGKAP — jangan potong di tengah kalimat.\n5. alasan HARUS menyebut KUTIPAN LANGSUNG dari transkrip sebagai bukti mengapa momen ini viral.\n6. caption harus mengandung: hook kalimat pertama yang bikin penasaran + emoji relevan + min. 5 hashtag Indonesia yang relevan.\n7. Urutkan dari score TERTINGGI ke terendah.\n8. DILARANG memberikan teks penjelasan, pembukaan, atau penutup apapun di luar JSON.\n9. DILARANG menggunakan blok kode Markdown seperti ```json.\n10. Output HARUS berupa JSON array mentah, langsung dimulai dari tanda [\n\nFormat Output:\n[\n  {\n    \"nomor\": 1,\n    \"start\": \"HH:MM:SS\",\n    \"end\": \"HH:MM:SS\",\n    \"score\": 95,\n    \"tipe\": \"KOCAK/HEBOH/SENGGOL/KONTROVERSIAL/ROMANTIS\",\n    \"alasan\": \"Alasan singkat + kutipan langsung dari transkrip\",\n    \"caption\": \"Hook kalimat pertama yang bikin penasaran! 😱 Deskripsi singkat #hashtag1 #hashtag2 #hashtag3 #hashtag4 #hashtag5\"\n  }\n]",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [432, 48],
+      "id": "7f7d10c2-6303-4d5e-b99f-95473c4c86f6",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/cut-batch",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { url: $json.url, clips: $json.clips.map(c => ({ start: c.start, end: c.end })), mode: $json.mode } }}",
+        "options": {
+          "timeout": 1200000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1472, 48],
+      "id": "e1b31fe6-8dcf-4072-9995-f08b038a41ec",
+      "name": "HTTP Request",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "=http://host.docker.internal:8000/transcript?url={{ $('Telegram Trigger').item.json.message.text.trim().split(' ')[0] }}&range={{ $('Telegram Trigger').item.json.message.text.trim().split(' ')[1] ?? '' }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [224, 48],
+      "id": "4832f9bd-12dc-4109-b9b6-61d6f80f0c8b",
+      "name": "HTTP Request1"
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "={{ $json.chatId }}",
+        "binaryData": true,
+        "additionalFields": {
+          "caption": "={{ $json.caption }}"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2096, 48],
+      "id": "976926ca-48a3-4cda-860f-dc78549ee8e8",
+      "name": "Send a document",
+      "webhookId": "a9342e2f-af75-4360-b492-a69ed268812c",
+      "retryOnFail": true,
+      "continueOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "MGIrx6QXXkMEPydw",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fileSelector": "=/home/node/.n8n-files/{{ $json.file }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [1888, 48],
+      "id": "63af2ed4-9f16-4b11-aedc-8debfae19349",
+      "name": "Read/Write Files from Disk",
+      "retryOnFail": true,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [-416, 64],
+      "id": "bcea0987-e081-488c-a388-0e71dfbfd914",
+      "name": "Telegram Trigger",
+      "webhookId": "a5966c25-8a73-4a6b-999c-3ff20f75f335",
+      "credentials": {
+        "telegramApi": {
+          "id": "MGIrx6QXXkMEPydw",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=✅ Link diterima! 🔗 {{ $('Telegram Trigger').item.json.message.text }}  ⏳ Sedang diproses... tunggu beberapa menit ya!",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "id": "2d33c587-d00b-4073-99e5-dfc18beaec52",
+      "name": "Send a text message",
+      "webhookId": "a326a4c4-7d58-4056-85f5-40156333c9be",
+      "credentials": {
+        "telegramApi": {
+          "id": "MGIrx6QXXkMEPydw",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5c46a510-59e2-4969-982e-331a75f69c8d",
+              "leftValue": "={{ $json.message.text }}",
+              "rightValue": "youtube.com",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            },
+            {
+              "id": "1f26f541-f9af-4d03-83d2-f384df4443b1",
+              "leftValue": "={{ $json.message.text }}",
+              "rightValue": "youtu.be",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-224, 64],
+      "id": "92e0dd08-4ccc-4154-84b8-e871ae6ab0da",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=❌ Maaf, hanya menerima link YouTube!\n\nContoh yang valid:\n- https://youtube.com/watch?v=xxxxx\n- https://youtu.be/xxxxx\n\nSilakan kirim ulang dengan link yang benar 🙏",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [0, 144],
+      "id": "2a43ab43-6132-4731-9d3b-13cdd091078f",
+      "name": "Send a text message1",
+      "webhookId": "a326a4c4-7d58-4056-85f5-40156333c9be",
+      "credentials": {
+        "telegramApi": {
+          "id": "MGIrx6QXXkMEPydw",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse output dari AI Agent\nconst raw = $('AI Agent').item.json.output;\n\nlet moments;\ntry {\n  const match = raw.match(/\\[[\\s\\S]*\\]/);\n  if (!match) throw new Error('Format JSON tidak ditemukan dalam output AI');\n  moments = JSON.parse(match[0]);\n} catch (err) {\n  throw new Error('⚠️ AI gagal menghasilkan output yang valid. Error: ' + err.message);\n}\n\nconst original_text = $('Telegram Trigger').item.json.message.text.trim();\nconst parts = original_text.split(' ');\nconst yt_url = parts[0];\nconst range = parts[1] && parts[1].includes('-') ? parts[1] : null;\nconst isGaming = original_text.toUpperCase().includes('GAMING');\nconst mode = isGaming ? \"gaming\" : \"normal\";\nconst chatId = $('Telegram Trigger').item.json.message.chat.id;\n\n// Build notifikasi ke user\nlet msg = `🎬 *3 Momen Terbaik Ditemukan!*\\n`;\nmsg += `Mode: ${isGaming ? '🎮 Gaming (Facecam)' : '📺 Normal'}\\n`;\nmsg += range ? `⏰ Range: ${range}\\n\\n` : '\\n';\n\nmoments.forEach((m, i) => {\n  msg += `*${i + 1}.* ⏱ ${m.start} - ${m.end} | ${m.tipe}\\n`;\n  msg += `📝 ${m.alasan}\\n`;\n  msg += `🏷️ ${m.caption.substring(0, 70)}...\\n\\n`;\n});\n\nmsg += `⏳ Memulai pemotongan *${moments.length} klip* secara otomatis...`;\nmsg += `\\n📹 Klip akan dikirim satu per satu.`;\n\nreturn [{\n  json: {\n    chatId: chatId,\n    text: msg\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 48],
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Parse AI & Notify"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [848, 48],
+      "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "name": "Send text (Notify)",
+      "webhookId": "f1e2d3c4-b5a6-7890-cdef-1234567890ab",
+      "credentials": {
+        "telegramApi": {
+          "id": "MGIrx6QXXkMEPydw",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse output dari AI Agent (independen dari Parse AI & Notify)\nconst raw = $('AI Agent').item.json.output;\n\nlet moments;\ntry {\n  const match = raw.match(/\\[[\\s\\S]*\\]/);\n  if (!match) throw new Error('Format JSON tidak ditemukan dalam output AI');\n  moments = JSON.parse(match[0]);\n} catch (err) {\n  throw new Error('⚠️ AI gagal menghasilkan output yang valid. Error: ' + err.message);\n}\n\nconst original_text = $('Telegram Trigger').item.json.message.text.trim();\nconst parts = original_text.split(' ');\nconst yt_url = parts[0];\nconst range = parts[1] && parts[1].includes('-') ? parts[1] : null;\nconst isGaming = original_text.toUpperCase().includes('GAMING');\nconst mode = isGaming ? \"gaming\" : \"normal\";\nconst chatId = $('Telegram Trigger').item.json.message.chat.id;\n\n// Split menjadi 3 item — satu per klip\nreturn moments.map((m, i) => ({\n  json: {\n    url: yt_url,\n    start: m.start,\n    end: m.end,\n    caption: m.caption,\n    mode: mode,\n    nomor: m.nomor,\n    score: m.score,\n    tipe: m.tipe,\n    alasan: m.alasan,\n    total: moments.length,\n    chatId: chatId,\n    index: i\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1056, 48],
+      "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "name": "Split to 3 Clips"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Agregasi 3 item menjadi 1 batch request\nconst items = $input.all();\n\nreturn [{\n  json: {\n    url: items[0].json.url,\n    clips: items.map(item => ({\n      start: item.json.start,\n      end: item.json.end\n    })),\n    mode: items[0].json.mode\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1264, 48],
+      "id": "f7a8b9c0-d1e2-3456-ghij-klmnop789012",
+      "name": "Aggregate for Batch"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Split batch response menjadi item per-klip\nconst batchResult = $input.first().json;\nconst originalItems = $('Split to 3 Clips').all();\n\nif (!batchResult.clips || !Array.isArray(batchResult.clips)) {\n  throw new Error('Batch response tidak valid: ' + JSON.stringify(batchResult));\n}\n\n// Map setiap clip hasil ke item, gabung dengan metadata dari Split node\nreturn batchResult.clips.map((clip, i) => {\n  const orig = originalItems[i] || { json: {} };\n  return {\n    json: {\n      file: clip.file || null,\n      size_mb: clip.size_mb || 0,\n      status: clip.status || 'error',\n      error: clip.error || null,\n      caption: orig.json.caption || '',\n      chatId: orig.json.chatId || items[0].json.chatId,\n      nomor: i + 1,\n      start: orig.json.start || '',\n      end: orig.json.end || '',\n      mode: orig.json.mode || batchResult.mode || 'normal'\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1680, 48],
+      "id": "a8b9c0d1-e2f3-4567-hijk-lmnopq890123",
+      "name": "Split Batch Result"
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 3,
+        "unit": "seconds"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2304, 48],
+      "id": "f6a7b8c9-d0e1-2345-fghi-jklmn6789012",
+      "name": "Wait",
+      "continueOnFail": true,
+      "webhookId": "c5d6e7f8-a9b0-1234-defg-hijkl5678901"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Helper: truncate string tanpa memotong emoji di tengah\nconst safeTruncate = (str, maxLen) => {\n  const chars = Array.from(str);\n  return chars.length > maxLen ? chars.slice(0, maxLen).join('') + '...' : str;\n};\n\n// Agregasi hasil semua klip (baca dari Split Batch Result)\nconst items = $(\"Split Batch Result\").all();\nconst total = items.length;\n\n// Deteksi item sukses: punya field 'file' tanpa error\nconst successItems = items.filter(i => {\n  const j = i.json;\n  return j.file && j.status === 'success';\n});\nconst failedItems = items.filter(i => {\n  const j = i.json;\n  return !j.file || j.status !== 'success';\n});\n\nconst success = successItems.length;\nconst failed = failedItems.length;\n\n// Fallback chatId\nconst firstItem = successItems[0] || items[0];\nconst chatId = (firstItem && firstItem.json.chatId) ? firstItem.json.chatId : '6485651144';\n\nlet msg = `✅ *Selesai!* ${success}/${total} klip berhasil dipotong.\\n\\n`;\n\nsuccessItems.forEach(item => {\n  msg += `🎬 *Klip #${item.json.nomor}* ⏱ ${item.json.start}-${item.json.end}\\n`;\n  msg += `📝 ${safeTruncate(item.json.caption, 60)}...\\n\\n`;\n});\n\nif (failed > 0) {\n  msg += `⚠️ *${failed} klip gagal diproses.*\\n`;\n  failedItems.forEach(item => {\n    msg += `❌ Klip #${item.json.nomor}: ${item.json.error || 'Unknown error'}\\n`;\n  });\n  msg += `\\nSilakan coba lagi atau gunakan video lain.\\n`;\n}\n\nmsg += `🔗 Kirim link YouTube lain untuk melanjutkan!`;\n\nreturn [{\n  json: {\n    chatId: chatId,\n    text: msg\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2512, 48],
+      "id": "d4e5f6a7-b8c9-0123-defg-hijkl4567890",
+      "name": "Code (Summary)"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2720, 48],
+      "id": "e5f6a7b8-c9d0-1234-efgh-ijklm5678901",
+      "name": "Send text (Final)",
+      "webhookId": "d6e7f8a9-b0c1-2345-efgh-ijklm6789012",
+      "credentials": {
+        "telegramApi": {
+          "id": "MGIrx6QXXkMEPydw",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list",
+          "cachedResultName": "claude-sonnet-4-6"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.5,
+      "position": [432, 272],
+      "id": "ddec50e1-3aa3-4a51-9872-91a864fb6e7f",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "CxMXj2VIjoL9h6FF",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [784, 304],
+      "id": "b325855f-1eb6-4253-b9f1-c9d819097fb1",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "AazxdqerkpcQ9aBp",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse AI & Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Split Batch Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a document": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read/Write Files from Disk": {
+      "main": [
+        [
+          {
+            "node": "Send a document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a text message": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a text message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI & Notify": {
+      "main": [
+        [
+          {
+            "node": "Send text (Notify)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send text (Notify)": {
+      "main": [
+        [
+          {
+            "node": "Split to 3 Clips",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split to 3 Clips": {
+      "main": [
+        [
+          {
+            "node": "Aggregate for Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate for Batch": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Batch Result": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Code (Summary)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code (Summary)": {
+      "main": [
+        [
+          {
+            "node": "Send text (Final)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send text (Final)": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [[]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "93b48964-fa34-483d-bb0e-1176a2c1ff76",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "ae3586e867ff7d88c81b814417f0a8e5523aefb6b98e0958c4f70029adc39945"
+  },
+  "nodeGroups": [],
+  "id": "MEg4sft5rp6xCrEf",
+  "tags": []
+}
