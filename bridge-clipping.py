@@ -8,6 +8,7 @@ import sys
 import shutil
 import tempfile
 import platform
+import concurrent.futures
 
 app = FastAPI()
 
@@ -43,6 +44,12 @@ class BatchClipRequest(BaseModel):
     url: str
     clips: list[dict]  # [{"start": "HH:MM:SS", "end": "HH:MM:SS"}, ...]
     mode: str = "normal"
+
+
+class GamingCompilationRequest(BaseModel):
+    url: str
+    clips: list[dict]  # [{"start": "HH:MM:SS", "end": "HH:MM:SS"}, ...]  (5 momen)
+    facecam_position: str = "btmleft"  # "btmleft" | "btmright" | "topleft" | "topright"
 
 
 # ─────────────────────────────────────────
@@ -118,7 +125,7 @@ def create_ass_word_by_word(entries, clip_start_sec, clip_end_sec, width=1080, h
         " OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut,"
         " ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow,"
         " Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        "Style: Default,Google Sans,48,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,"
+        "Style: Default,Google Sans,56,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,"
         "1,0,0,0,100,100,0,0,1,2.5,1,2,10,10,30,1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -133,7 +140,7 @@ def create_ass_word_by_word(entries, clip_start_sec, clip_end_sec, width=1080, h
         rel_start = max(0, es - clip_start_sec)
         rel_end = min(clip_end_sec, ee) - clip_start_sec
 
-        words = e.text.strip().split()
+        words = e.text.strip().upper().split()
         if not words:
             continue
 
@@ -191,7 +198,7 @@ def transcribe_audio(audio_path):
                     })
     return words
 
-def create_ass_from_whisper(words, width=1080, height=1080):
+def create_ass_from_whisper(words, width=1080, height=1080, margin_v=30):
     """Buat ASS karaoke dari whisper word timestamps"""
     if not words:
         return ""
@@ -216,8 +223,8 @@ def create_ass_from_whisper(words, width=1080, height=1080):
         " OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut,"
         " ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow,"
         " Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        "Style: Default,Google Sans,48,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,"
-        "1,0,0,0,100,100,0,0,1,2.5,1,2,10,10,30,1\n\n"
+        "Style: Default,Google Sans,56,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,"
+        f"1,0,0,0,100,100,0,0,1,2.5,1,2,10,10,{margin_v},1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
@@ -226,6 +233,7 @@ def create_ass_from_whisper(words, width=1080, height=1080):
     lines = []
     current_line = []
     for i, w in enumerate(words):
+        w["word"] = w["word"].upper()
         current_line.append(w)
         gap = words[i + 1]["start"] - w["end"] if i + 1 < len(words) else 999
         if gap > 0.7 or len(current_line) >= 2:
@@ -304,7 +312,16 @@ def yt_dlp_cmd():
 # FACECAM CROP (pojok kiri bawah)
 # ─────────────────────────────────────────
 
-def get_facecam_crop(video_path: str):
+# Facecam position presets — (crop_anchor_x, crop_anchor_y)
+FACECAM_POSITIONS = {
+    "btmleft":  {"x": "left",   "y": "bottom"},
+    "btmright": {"x": "right",  "y": "bottom"},
+    "topleft":  {"x": "left",   "y": "top"},
+    "topright": {"x": "right",  "y": "top"},
+}
+
+
+def get_facecam_crop(video_path: str, position: str = "btmleft"):
     result = subprocess.check_output([
         FFPROBE_EXE, "-v", "error",
         "-select_streams", "v:0",
@@ -317,13 +334,72 @@ def get_facecam_crop(video_path: str):
     vid_h = int(result[1])
     print(f"📐 Video: {vid_w}x{vid_h}")
 
-    cam_w = int(vid_w * 0.30)
-    cam_h = int(vid_h * 0.35)
-    cam_x = 0
-    cam_y = vid_h - cam_h
+    cam_w = int(vid_w * 0.40)
+    cam_h = int(vid_h * 0.45)
 
-    print(f"✅ Facecam → x={cam_x} y={cam_y} w={cam_w} h={cam_h}")
+    pos = FACECAM_POSITIONS.get(position, FACECAM_POSITIONS["btmleft"])
+    cam_x = vid_w - cam_w if pos["x"] == "right" else 0
+    cam_y = vid_h - cam_h if pos["y"] == "bottom" else 0
+
+    print(f"✅ Facecam ({position}) → x={cam_x} y={cam_y} w={cam_w} h={cam_h}")
     return (cam_x, cam_y, cam_w, cam_h)
+
+
+# ─────────────────────────────────────────
+# GAMING 50/50 FILTER (facecam atas, gameplay bawah)
+# ─────────────────────────────────────────
+
+def _apply_gaming_pip_filter(video_path: str, srt_file: str | None,
+                             facecam_position: str, prefix: str) -> str:
+    """
+    Gaming 50/50 filter:
+    - Top 50% (1080×960): Facecam crop → hqdn3d denoise → unsharp → scale
+    - Bottom 50% (1080×960): Gameplay fullscreen → scale
+    - vstack → 1080×1920, subtitle dibakar di atas komposit
+    """
+    tmp_merged = os.path.join(TMP_DIR, f"merged_{prefix}.mp4")
+
+    cx, cy, cw, ch = get_facecam_crop(video_path, facecam_position)
+
+    # ASS subtitle chain
+    sub_chain = ""
+    if srt_file:
+        srt_escaped = srt_file.replace('\\', '/').replace(':', '\\:')
+        sub_chain = f"ass='{srt_escaped}'"
+
+    # Build filter_complex
+    video_filter = (
+        # Split source ke 2 stream
+        f"[0:v]split[main][cam_raw];"
+        # Facecam (TOP 50%): crop → scale 2x → sharpen → scale final
+        f"[cam_raw]crop={cw}:{ch}:{cx}:{cy},"
+        f"scale=iw*2:ih*2:flags=lanczos,"
+        f"cas=0.5,"
+        f"scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop=1080:960,setsar=1[top];"
+        # Gameplay (BOTTOM 50%): full frame → scale ke 1080×960
+        f"[main]scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop=1080:960,setsar=1[bottom];"
+        # Stack: facecam atas, gameplay bawah
+        f"[top][bottom]vstack=inputs=2[comp];"
+    )
+
+    # Subtitle (jika ada)
+    if srt_file:
+        video_filter += f"[comp]{sub_chain}[v]"
+    else:
+        video_filter += f"[comp]null[v]"
+
+    subprocess.run([
+        FFMPEG_EXE, "-i", video_path,
+        "-filter_complex", video_filter,
+        "-map", "[v]", "-map", "0:a?",
+        "-c:v", "libx264", "-crf", "20", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        tmp_merged, "-y"
+    ], check=True)
+
+    return tmp_merged
 
 
 # ─────────────────────────────────────────
@@ -369,7 +445,7 @@ def _download_video_section(url: str, start_sec: float, end_sec: float, tag: str
     subprocess.run(
         yt_dlp_cmd() + [
             "--download-sections", f"*{start_str}-{end_str}",
-            "-f", "best[height<=1080]+bestaudio/best[height<=720]+bestaudio/best",
+            "-f", "37/22/18/best",  # non-DASH formats only (support section download)
             "--merge-output-format", "mp4",
             "-o", tmp_yt,
             url
@@ -380,7 +456,9 @@ def _download_video_section(url: str, start_sec: float, end_sec: float, tag: str
     return tmp_yt
 
 
-def _whisper_subtitle(video_path: str, prefix: str) -> str | None:
+def _whisper_subtitle(video_path: str, prefix: str,
+                      ass_width: int = 1080, ass_height: int = 1080,
+                      ass_margin_v: int = 30) -> str | None:
     """
     Extract audio, transcribe dengan Whisper, generate ASS subtitle.
     Return path ke file ASS atau None jika gagal.
@@ -398,7 +476,7 @@ def _whisper_subtitle(video_path: str, prefix: str) -> str | None:
         words = transcribe_audio(tmp_audio)
         print(f"📝 Whisper: {len(words)} kata terdeteksi")
 
-        ass_content = create_ass_from_whisper(words)
+        ass_content = create_ass_from_whisper(words, width=ass_width, height=ass_height, margin_v=ass_margin_v)
         if ass_content:
             srt_file = os.path.join(TMP_DIR, f"sub_{prefix}.ass")
             with open(srt_file, 'w', encoding='utf-8') as f:
@@ -434,18 +512,18 @@ def _apply_tiktok_filter(video_path: str, srt_file: str | None,
             video_filter = (
                 f"[0:v]{sub_chain}[subbed];"
                 f"[subbed]crop={cw}:{ch}:{cx}:{cy},"
-                f"scale=1080:960:force_original_aspect_ratio=increase,"
+                f"scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop=1080:960,setsar=1[top];"
-                f"[subbed]scale=1080:960:force_original_aspect_ratio=increase,"
+                f"[subbed]scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop=1080:960,setsar=1[bottom];"
                 f"[top][bottom]vstack=inputs=2[v]"
             )
         else:
             video_filter = (
                 f"[0:v]crop={cw}:{ch}:{cx}:{cy},"
-                f"scale=1080:960:force_original_aspect_ratio=increase,"
+                f"scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop=1080:960,setsar=1[top];"
-                f"[0:v]scale=1080:960:force_original_aspect_ratio=increase,"
+                f"[0:v]scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop=1080:960,setsar=1[bottom];"
                 f"[top][bottom]vstack=inputs=2[v]"
             )
@@ -454,16 +532,16 @@ def _apply_tiktok_filter(video_path: str, srt_file: str | None,
         if srt_file:
             video_filter = (
                 "[0:v]split[orig_raw][bg];"
-                "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=15:15[blurred];"
-                f"[orig_raw]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080[scaled];"
+                "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,boxblur=15:15[blurred];"
+                f"[orig_raw]scale=1080:1080:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1080[scaled];"
                 f"[scaled]{sub_chain}[fg];"
                 "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
             )
         else:
             video_filter = (
                 "[0:v]split[orig][bg];"
-                "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=15:15[blurred];"
-                "[orig]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080[fg];"
+                "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,boxblur=15:15[blurred];"
+                "[orig]scale=1080:1080:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1080[fg];"
                 "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
             )
 
@@ -471,12 +549,127 @@ def _apply_tiktok_filter(video_path: str, srt_file: str | None,
         FFMPEG_EXE, "-i", video_path,
         "-filter_complex", video_filter,
         "-map", "[v]", "-map", "0:a?",
-        "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+        "-c:v", "libx264", "-crf", "20", "-preset", "fast", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",
         tmp_merged, "-y"
     ], check=True)
 
     return tmp_merged
+
+
+# ─────────────────────────────────────────
+# CONCAT + TRANSITIONS (xfade / acrossfade)
+# ─────────────────────────────────────────
+
+# Transisi per pasangan klip (1→2, 2→3, 3→4, 4→5)
+_TRANSITIONS = [
+    {"video": "fade",        "vid_dur": 0.4, "aud_dur": 0.3},
+    {"video": "smoothleft",  "vid_dur": 0.5, "aud_dur": 0.4},
+    {"video": "fade",        "vid_dur": 0.4, "aud_dur": 0.3},
+    {"video": "fadeblack",   "vid_dur": 0.5, "aud_dur": 0.4},
+]
+
+
+def _get_duration(path: str) -> float:
+    """Dapatkan durasi video (detik) via ffprobe."""
+    return float(subprocess.check_output([
+        FFPROBE_EXE, "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        path
+    ]).decode().strip())
+
+
+def _concat_with_transitions(clip_paths: list[str], output: str) -> str:
+    """
+    Gabungkan N klip dengan xfade (video) + acrossfade (audio).
+    Transisi bervariasi sesuai daftar _TRANSITIONS.
+    """
+    n = len(clip_paths)
+    if n == 0:
+        raise ValueError("Tidak ada klip untuk digabung")
+    if n == 1:
+        # Hanya 1 klip — rename langsung
+        os.rename(clip_paths[0], output)
+        return output
+
+    print(f"\n🎬 CONCAT: {n} klip → {output}")
+
+    # 1. Dapatkan durasi setiap klip
+    durs = []
+    for i, p in enumerate(clip_paths):
+        d = _get_duration(p)
+        durs.append(d)
+        print(f"  Klip #{i+1}: {d:.1f}s")
+
+    # 2. Bangun filter_complex untuk semua input
+    inputs = []
+    for p in clip_paths:
+        inputs += ["-i", p]
+
+    vid_streams = []
+    aud_streams = []
+    vid_filters = []
+    aud_filters = []
+
+    for i in range(n):
+        vid_streams.append(f"[{i}:v]")
+        aud_streams.append(f"[{i}:a]")
+
+    # Chain xfade video
+    # Format: [prev][curr]xfade=transition=T:dur=D:offset=O[next]
+    curr_vid = vid_streams[0]
+    cum_dur = durs[0]
+
+    for i in range(1, n):
+        tr = _TRANSITIONS[i - 1] if (i - 1) < len(_TRANSITIONS) else _TRANSITIONS[-1]
+        offset = cum_dur - tr["vid_dur"]
+        next_label = f"v{i}" if i < n - 1 else "v"
+        vid_filters.append(
+            f"{curr_vid}{vid_streams[i]}"
+            f"xfade=transition={tr['video']}:duration={tr['vid_dur']}:offset={offset:.2f}"
+            f"[{next_label}]"
+        )
+        curr_vid = f"[{next_label}]"
+        cum_dur += durs[i]
+
+    # Chain acrossfade audio
+    curr_aud = aud_streams[0]
+    cum_dur = durs[0]
+
+    for i in range(1, n):
+        tr = _TRANSITIONS[i - 1] if (i - 1) < len(_TRANSITIONS) else _TRANSITIONS[-1]
+        offset = cum_dur - tr["aud_dur"]
+        next_label = f"a{i}" if i < n - 1 else "a"
+        aud_filters.append(
+            f"{curr_aud}{aud_streams[i]}"
+            f"acrossfade=d={tr['aud_dur']}:c1=tri:c2=tri"
+            f"[{next_label}]"
+        )
+        curr_aud = f"[{next_label}]"
+        cum_dur += durs[i]
+
+    filter_complex = ";".join(vid_filters + aud_filters)
+
+    # Total durasi estimasi
+    total_dur = sum(durs) - sum(
+        _TRANSITIONS[i]["vid_dur"] for i in range(min(n - 1, len(_TRANSITIONS)))
+    )
+    print(f"  Total durasi: ~{total_dur:.1f}s ({total_dur / 60:.1f} menit)")
+
+    subprocess.run([
+        FFMPEG_EXE,
+        *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-crf", "20", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        output, "-y"
+    ], check=True)
+
+    final_size = os.path.getsize(output) / (1024 * 1024)
+    print(f"✅ Concat selesai: {output} ({final_size:.1f}MB)")
+    return output
 
 
 def _compress_to_target(source: str, output: str, target_mb: float = 45):
@@ -502,7 +695,7 @@ def _compress_to_target(source: str, output: str, target_mb: float = 45):
             "-b:v", f"{video_bitrate}k",
             "-maxrate", f"{video_bitrate}k",
             "-bufsize", f"{video_bitrate * 2}k",
-            "-c:v", "libx264", "-preset", "fast",
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k",
             output, "-y"
         ], check=True)
@@ -602,6 +795,152 @@ def _cut_video_impl(url: str, segments: list[dict], mode: str = "normal") -> lis
 
 
 # ─────────────────────────────────────────
+# GAMING COMPILATION — 5 klip → 1 video dengan transisi
+# ─────────────────────────────────────────
+
+def _process_gaming_compilation(url: str, clips: list[dict],
+                                facecam_position: str = "btmleft") -> dict:
+    """
+    Proses 5 klip gaming:
+    1. Parallel download (2 workers)
+    2. Sequential Whisper (thread-safety)
+    3. Parallel PiP filter + encode (3 workers)
+    4. Concat dengan xfade transitions → 1 video final
+    """
+    n = len(clips)
+    print(f"\n{'='*50}")
+    print(f"🎮 GAMING COMPILATION: {n} klip → 1 video")
+    print(f"📐 Facecam position: {facecam_position.upper()}")
+    for i, seg in enumerate(clips):
+        print(f"  Klip #{i+1}: {seg['start']} → {seg['end']}")
+    print(f"{'='*50}\n")
+
+    output = os.path.join(OUTPUT_DIR, "gaming_compilation.mp4")
+
+    downloaded = {}   # idx → path
+    filtered = {}     # idx → path
+    temp_files = []
+
+    try:
+        # ═══ STEP 1: Parallel download (max 2) + retry gagal ═══
+        print("📥 STEP 1: Parallel download...")
+        MAX_RETRIES = 2  # retry per klip yang gagal (403 transient)
+
+        def _download_with_retry(clip_index: int, seg: dict) -> str | None:
+            """Download satu klip, retry up to MAX_RETRIES kali jika gagal."""
+            start_sec = hhmmss_to_seconds(seg["start"])
+            end_sec = hhmmss_to_seconds(seg["end"])
+            prefix = f"g5_{seg['start'].replace(':', '')}_{clip_index}"
+            last_error = None
+            for attempt in range(1 + MAX_RETRIES):
+                try:
+                    path = _download_video_section(url, start_sec, end_sec, prefix)
+                    if attempt > 0:
+                        print(f"  ✅ Klip #{clip_index+1} retry #{attempt} BERHASIL")
+                    return path
+                except Exception as e:
+                    last_error = e
+                    if attempt < MAX_RETRIES:
+                        print(f"  🔄 Klip #{clip_index+1} gagal (attempt {attempt+1}), retry...")
+            print(f"  ❌ Klip #{clip_index+1} download GAGAL (setelah {1+MAX_RETRIES}x): {last_error}")
+            return None
+
+        # Parallel batch pertama
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {}
+            for i, seg in enumerate(clips):
+                fut = pool.submit(_download_with_retry, i, seg)
+                futures[fut] = i
+
+            for fut in concurrent.futures.as_completed(futures):
+                i = futures[fut]
+                try:
+                    path = fut.result()
+                    if path:
+                        downloaded[i] = path
+                        temp_files.append(path)
+                        print(f"  ✅ Klip #{i+1} downloaded")
+                except Exception as e:
+                    print(f"  ❌ Klip #{i+1} download GAGAL: {e}")
+
+        if len(downloaded) < 1:
+            raise RuntimeError("Semua download gagal — tidak bisa melanjutkan")
+        print(f"  📊 {len(downloaded)}/{n} berhasil didownload\n")
+
+        # ═══ STEP 2: Sequential Whisper (thread-safety model) ═══
+        print("🔊 STEP 2: Whisper transcribe (sequential)...")
+        srt_files = {}  # idx → path
+        for i in sorted(downloaded.keys()):
+            prefix = f"g5_{clips[i]['start'].replace(':', '')}_{i}"
+            try:
+                srt = _whisper_subtitle(
+                    downloaded[i], prefix,
+                    ass_width=1080, ass_height=1920,  # canvas 9:16
+                    ass_margin_v=120  # margin tinggi — hindari tumpang tindih dgn facecam
+                )
+                if srt:
+                    srt_files[i] = srt
+                    temp_files.append(srt)
+                    print(f"  ✅ Klip #{i+1}: {srt}")
+                else:
+                    print(f"  ⚠️ Klip #{i+1}: tanpa subtitle")
+            except Exception as e:
+                print(f"  ⚠️ Klip #{i+1} Whisper GAGAL: {e}")
+        print(f"  📊 {len(srt_files)}/{len(downloaded)} subtitle siap\n")
+
+        # ═══ STEP 3: Parallel PiP filter + encode (max 3 — CPU bound) ═══
+        print("🎨 STEP 3: PiP filter + encode (parallel)...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {}
+            for i in sorted(downloaded.keys()):
+                prefix = f"g5_{clips[i]['start'].replace(':', '')}_{i}"
+                srt = srt_files.get(i)
+                fut = pool.submit(
+                    _apply_gaming_pip_filter,
+                    downloaded[i], srt, facecam_position, prefix
+                )
+                futures[fut] = i
+
+            for fut in concurrent.futures.as_completed(futures):
+                i = futures[fut]
+                try:
+                    path = fut.result()
+                    filtered[i] = path
+                    temp_files.append(path)
+                    print(f"  ✅ Klip #{i+1} filtered")
+                except Exception as e:
+                    print(f"  ❌ Klip #{i+1} filter GAGAL: {e}")
+
+        if len(filtered) < 1:
+            raise RuntimeError("Semua filter gagal — tidak bisa melanjutkan")
+        print(f"  📊 {len(filtered)}/{len(downloaded)} berhasil difilter\n")
+
+        # ═══ STEP 4: Concat dengan transisi ═══
+        print("🔗 STEP 4: Concat dengan transisi...")
+        ordered_paths = [filtered[i] for i in sorted(filtered.keys())]
+        _concat_with_transitions(ordered_paths, output)
+
+        final_size = os.path.getsize(output) / (1024 * 1024)
+        print(f"\n✅ KOMPILASI SELESAI: {output} ({final_size:.1f}MB)")
+
+        return {
+            "status": "success",
+            "file": os.path.basename(output),
+            "size_mb": round(final_size, 1),
+            "clips_processed": len(filtered),
+            "total_clips": n,
+            "facecam_position": facecam_position
+        }
+
+    finally:
+        # Cleanup temp files (kecuali output final)
+        for f in temp_files:
+            if f and os.path.exists(f) and f != output:
+                os.remove(f)
+                print(f"🗑️ Hapus temp: {f}")
+
+
+# ─────────────────────────────────────────
 # ENDPOINTS
 # ─────────────────────────────────────────
 
@@ -654,6 +993,46 @@ async def cut_video_batch(request: BatchClipRequest):
         "failed": fail_count,
         "clips": results
     }
+
+
+@app.post("/cut-gaming-compilation")
+async def cut_gaming_compilation(request: GamingCompilationRequest):
+    """
+    Endpoint kompilasi gaming: 5 klip → 1 video dengan transisi.
+    Request body:
+    {
+      "url": "https://youtube.com/watch?v=xxx",
+      "clips": [
+        {"start": "00:01:30", "end": "00:02:00"},
+        ... (5 momen)
+      ],
+      "facecam_position": "btmleft"
+    }
+    Response:
+    {
+      "status": "success",
+      "file": "gaming_compilation.mp4",
+      "size_mb": 45.2,
+      "clips_processed": 5,
+      "total_clips": 5,
+      "facecam_position": "btmleft"
+    }
+    """
+    try:
+        result = _process_gaming_compilation(
+            request.url, request.clips, request.facecam_position
+        )
+        return result
+    except Exception as e:
+        print(f"❌ Gaming compilation GAGAL: {e}")
+        return {
+            "status": "error",
+            "file": None,
+            "size_mb": 0,
+            "clips_processed": 0,
+            "total_clips": len(request.clips) if request.clips else 0,
+            "error": str(e)
+        }
 
 
 if __name__ == "__main__":
