@@ -3,10 +3,11 @@
 import os
 import subprocess
 import concurrent.futures
-from config import FFMPEG_EXE, TMP_DIR, OUTPUT_DIR, yt_dlp_cmd
+from datetime import datetime
+from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, OUTPUT_DIR, yt_dlp_cmd
 from utils import seconds_to_hhmmss, hhmmss_to_seconds
 from subtitles import transcribe_audio, create_ass_from_whisper
-from filters import apply_tiktok_filter, apply_gaming_pip_filter
+from filters import apply_tiktok_filter, apply_gaming_pip_filter, apply_gaming_pip_overlay_filter, apply_gaming_normal_overlay_filter
 from transitions import concat_with_transitions, compress_to_target
 
 
@@ -14,29 +15,170 @@ from transitions import concat_with_transitions, compress_to_target
 # DOWNLOAD
 # ─────────────────────────────────────────
 
-def _download_video_section(url: str, start_sec: float, end_sec: float, tag: str) -> str:
+# ─────────────────────────────────────────
+# FULL VIDEO CACHE — download sekali, potong lokal
+# ─────────────────────────────────────────
+
+import re as _re
+import hashlib
+
+def _extract_video_id(url: str) -> str:
+    """Extract YouTube video ID dari URL."""
+    for pat in [r'(?:youtube\.com/live/|youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})']:
+        m = _re.search(pat, url)
+        if m:
+            return m.group(1)
+    return hashlib.md5(url.encode()).hexdigest()[:12]
+
+
+def _download_full_video(url: str) -> str:
     """
-    Download satu section YouTube.
-    Return path ke file hasil download (codec asli YouTube).
+    Download FULL video SEKALI dengan format DASH HD → cache di TMP_DIR.
+    Return path ke file full video yang sudah di-download.
+    Full download (tanpa --download-sections) → standard yt-dlp code path,
+    lebih reliable daripada --download-sections untuk DASH.
+    """
+    video_id = _extract_video_id(url)
+    cache_path = os.path.join(TMP_DIR, f"full_{video_id}.mp4")
+
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100000:
+        print(f"📦 Cache hit: {cache_path} ({os.path.getsize(cache_path)/1024/1024:.0f}MB)")
+        return cache_path
+
+    print(f"📥 Download FULL video (sekali untuk semua klip)...")
+    # Cascade: 720p60 DASH → 480p DASH → best merged
+    FORMAT_CASCADE = [
+        ("298+140", "720p60 DASH"),
+        ("135+140", "480p30 DASH"),
+        ("best",     "merged"),
+    ]
+
+    for fmt, label in FORMAT_CASCADE:
+        try:
+            print(f"   🎯 Mencoba: {label} ({fmt})...")
+            subprocess.run(
+                yt_dlp_cmd() + [
+                    "-f", fmt,
+                    "--merge-output-format", "mp4",
+                    "-o", cache_path,
+                    url
+                ], check=True, timeout=7200  # 2 jam untuk full video
+            )
+
+            # Cek resolusi
+            probe = subprocess.check_output([
+                FFPROBE_EXE, "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0",
+                cache_path
+            ]).decode().strip()
+            w, h = probe.split(",")
+            size_gb = os.path.getsize(cache_path) / (1024**3)
+            print(f"   ✅ Full video: {w}x{h}, {size_gb:.1f}GB [{label}]")
+            if int(w) < 1280:
+                print(f"   ⚠️ {w}x{h} — facecam akan kurang tajam!")
+            return cache_path
+        except Exception as e:
+            print(f"   ❌ Gagal ({label}): {e}")
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
+            continue
+
+    raise RuntimeError("Gagal download full video — semua format gagal")
+
+
+def _download_section(url: str, start_sec: float, end_sec: float, output_path: str):
+    """
+    Download section 720p HD (~5-15 detik).
+    1. Format 22 (720p merged) via --download-sections — tercepat
+    2. DASH 720p via direct URL + ffmpeg remote seek
+    3. Fallback full download
     """
     start_str = seconds_to_hhmmss(start_sec)
     end_str = seconds_to_hhmmss(end_sec)
+    duration = end_sec - start_sec
 
-    tmp_yt = os.path.join(TMP_DIR, f"yt_dl_{tag}.mp4")
+    print(f"⚡ Download section {start_str} → {end_str}...")
 
-    print(f"⬇️ Downloading {start_str} - {end_str} ({tag})...")
-    subprocess.run(
-        yt_dlp_cmd() + [
-            "--download-sections", f"*{start_str}-{end_str}",
-            "-f", "37/22/18/best",  # non-DASH formats only (support section download)
-            "--merge-output-format", "mp4",
-            "-o", tmp_yt,
-            url
-        ], check=True
-    )
+    # ── STEP 1: Format 22 (720p merged) via --download-sections ──
+    try:
+        subprocess.run(
+            yt_dlp_cmd() + [
+                "--download-sections", f"*{start_str}-{end_str}",
+                "-f", "22/best[height<=720]/best",
+                "--merge-output-format", "mp4",
+                "-o", output_path,
+                url
+            ], check=True, timeout=120
+        )
+        h = int(subprocess.check_output([
+            FFPROBE_EXE, "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=height",
+            "-of", "csv=p=0", output_path
+        ]).decode().strip())
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        print(f"✅ 720p merged: {h}p, {size_mb:.1f}MB")
+        return output_path
+    except Exception as e:
+        print(f"⚠️ Format 22 tidak tersedia ({str(e)[:60]}), coba DASH...")
+        if os.path.exists(output_path):
+            os.remove(output_path)
 
-    print(f"✅ Download selesai: {tmp_yt}")
-    return tmp_yt
+    # ── STEP 2: DASH 720p via direct URL + ffmpeg remote seek ──
+    try:
+        print("🔗 Direct DASH 720p URL...")
+        raw = subprocess.check_output(
+            yt_dlp_cmd() + ["-f", "bestvideo[height<=720]+bestaudio", "-g", url],
+            text=True, timeout=60
+        ).strip()
+        urls = [u for u in raw.split('\n') if u.startswith('http')]
+
+        print(f"🎬 ffmpeg remote seek...")
+        subprocess.run([
+            FFMPEG_EXE,
+            "-ss", start_str, "-i", urls[0],
+            "-ss", start_str, "-i", urls[1],
+            "-t", str(duration),
+            "-c:v", "copy", "-c:a", "copy",
+            "-avoid_negative_ts", "make_zero",
+            output_path, "-y"
+        ], check=True, timeout=120)
+
+        h = int(subprocess.check_output([
+            FFPROBE_EXE, "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=height",
+            "-of", "csv=p=0", output_path
+        ]).decode().strip())
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        print(f"✅ DASH 720p: {h}p, {size_mb:.1f}MB")
+        return output_path
+
+    except Exception as e:
+        print(f"⚠️ DASH gagal ({str(e)[:60]}), fallback full download...")
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+    # ── STEP 3: Full download + local cut ──
+    full_video = _download_full_video(url)
+    _cut_section_locally(full_video, start_sec, end_sec, output_path)
+    return output_path
+
+
+def _cut_section_locally(full_path: str, start_sec: float, end_sec: float,
+                          output_path: str):
+    """Potong section dari full video lokal pakai ffmpeg stream copy (instan)."""
+    start_str = seconds_to_hhmmss(start_sec)
+    duration = end_sec - start_sec
+    subprocess.run([
+        FFMPEG_EXE, "-ss", start_str, "-i", full_path,
+        "-t", str(duration),
+        "-c:v", "copy", "-c:a", "copy",
+        "-avoid_negative_ts", "make_zero",
+        "-y", output_path
+    ], check=True)
 
 
 # ─────────────────────────────────────────
@@ -86,9 +228,8 @@ def _whisper_subtitle(video_path: str, prefix: str,
 def _process_single_clip_full(url: str, start_str: str, end_str: str,
                               mode: str, clip_idx: int) -> dict:
     """
-    Download section spesifik + proses satu klip.
-    Setiap klip download section-nya sendiri (bukan full range)
-    agar tidak membuang waktu download bagian yang tidak diperlukan.
+    Download section LANGSUNG via --download-sections (CEPAT) + Whisper + Filter + Compress.
+    Fallback ke full download + local cut jika --download-sections gagal.
     """
     start_sec = hhmmss_to_seconds(start_str)
     end_sec = hhmmss_to_seconds(end_str)
@@ -100,8 +241,10 @@ def _process_single_clip_full(url: str, start_str: str, end_str: str,
     srt_file = None
 
     try:
-        # Step 1: Download section spesifik klip ini saja (30-60 detik)
-        source_h264 = _download_video_section(url, start_sec, end_sec, prefix)
+        # Step 1: Download section LANGSUNG (cepat — hanya 30-60 detik dari video)
+        tmp_yt = os.path.join(TMP_DIR, f"yt_dl_{prefix}.mp4")
+        _download_section(url, start_sec, end_sec, tmp_yt)
+        source_h264 = tmp_yt
 
         # Step 2: Whisper subtitle
         srt_file = _whisper_subtitle(source_h264, prefix)
@@ -182,67 +325,57 @@ def cut_video_task(url: str, start: str, end: str, mode: str = "normal"):
 # ─────────────────────────────────────────
 
 def process_gaming_compilation(url: str, clips: list[dict],
-                                facecam_position: str = "btmleft") -> dict:
+                                facecam_position: str = "btmleft",
+                                layout: str = "split") -> dict:
     """
     Proses 5 klip gaming:
-    1. Parallel download (2 workers)
+    1. Parallel --download-sections (3 workers, CEPAT)
     2. Sequential Whisper (thread-safety)
     3. Parallel PiP filter + encode (3 workers)
     4. Concat dengan xfade transitions → 1 video final
+
+    Args:
+        layout: "split" = 50/50 facecam atas + gameplay bawah (default)
+                "pip"   = gameplay fullscreen + facecam overlay kecil di pojok (lebih tajam)
+                "normal-gaming" = blur bg + gameplay 4:3 centered + facecam overlay di pojok gameplay
     """
     n = len(clips)
     print(f"\n{'='*50}")
     print(f"🎮 GAMING COMPILATION: {n} klip → 1 video")
-    print(f"📐 Facecam position: {facecam_position.upper()}")
+    print(f"📐 Facecam position: {facecam_position.upper()} | Layout: {layout.upper()}")
     for i, seg in enumerate(clips):
         print(f"  Klip #{i+1}: {seg['start']} → {seg['end']}")
     print(f"{'='*50}\n")
 
-    output = os.path.join(OUTPUT_DIR, "gaming_compilation.mp4")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output = os.path.join(OUTPUT_DIR, f"gaming_compilation_{timestamp}.mp4")
 
     downloaded = {}   # idx → path
     filtered = {}     # idx → path
     temp_files = []
 
     try:
-        # ═══ STEP 1: Parallel download (max 2) + retry gagal ═══
-        print("📥 STEP 1: Parallel download...")
-        MAX_RETRIES = 2  # retry per klip yang gagal (403 transient)
-
-        def _download_with_retry(clip_index: int, seg: dict) -> str | None:
-            """Download satu klip, retry up to MAX_RETRIES kali jika gagal."""
-            start_sec = hhmmss_to_seconds(seg["start"])
-            end_sec = hhmmss_to_seconds(seg["end"])
-            prefix = f"g5_{seg['start'].replace(':', '')}_{clip_index}"
-            last_error = None
-            for attempt in range(1 + MAX_RETRIES):
-                try:
-                    path = _download_video_section(url, start_sec, end_sec, prefix)
-                    if attempt > 0:
-                        print(f"  ✅ Klip #{clip_index+1} retry #{attempt} BERHASIL")
-                    return path
-                except Exception as e:
-                    last_error = e
-                    if attempt < MAX_RETRIES:
-                        print(f"  🔄 Klip #{clip_index+1} gagal (attempt {attempt+1}), retry...")
-            print(f"  ❌ Klip #{clip_index+1} download GAGAL (setelah {1+MAX_RETRIES}x): {last_error}")
-            return None
-
-        # Parallel batch pertama
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        # ═══ STEP 1: Parallel download section LANGSUNG (CEPAT) ═══
+        print("⚡ STEP 1: Parallel download section (3 workers)...")
+        import concurrent.futures as cf
+        with cf.ThreadPoolExecutor(max_workers=3) as pool:
             futures = {}
             for i, seg in enumerate(clips):
-                fut = pool.submit(_download_with_retry, i, seg)
-                futures[fut] = i
+                start_sec = hhmmss_to_seconds(seg["start"])
+                end_sec = hhmmss_to_seconds(seg["end"])
+                prefix = f"g5_{seg['start'].replace(':', '')}_{i}"
+                tmp_yt = os.path.join(TMP_DIR, f"yt_dl_{prefix}.mp4")
 
-            for fut in concurrent.futures.as_completed(futures):
-                i = futures[fut]
+                fut = pool.submit(_download_section, url, start_sec, end_sec, tmp_yt)
+                futures[fut] = (i, seg, tmp_yt)
+
+            for fut in cf.as_completed(futures):
+                i, seg, tmp_yt = futures[fut]
                 try:
-                    path = fut.result()
-                    if path:
-                        downloaded[i] = path
-                        temp_files.append(path)
-                        print(f"  ✅ Klip #{i+1} downloaded")
+                    fut.result()
+                    downloaded[i] = tmp_yt
+                    temp_files.append(tmp_yt)
+                    print(f"  ✅ Klip #{i+1}: {seg['start']} → {seg['end']} ({os.path.getsize(tmp_yt)/1024/1024:.1f}MB)")
                 except Exception as e:
                     print(f"  ❌ Klip #{i+1} download GAGAL: {e}")
 
@@ -272,14 +405,23 @@ def process_gaming_compilation(url: str, clips: list[dict],
         print(f"  📊 {len(srt_files)}/{len(downloaded)} subtitle siap\n")
 
         # ═══ STEP 3: Parallel PiP filter + encode (max 3 — CPU bound) ═══
-        print("🎨 STEP 3: PiP filter + encode (parallel)...")
+        if layout == "pip":
+            filter_fn = apply_gaming_pip_overlay_filter
+            layout_label = "PiP overlay"
+        elif layout == "normal-gaming":
+            filter_fn = apply_gaming_normal_overlay_filter
+            layout_label = "Normal Gaming (blur + 4:3 + facecam)"
+        else:
+            filter_fn = apply_gaming_pip_filter
+            layout_label = "50/50 split"
+        print(f"🎨 STEP 3: {layout_label} filter + encode (parallel)...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             futures = {}
             for i in sorted(downloaded.keys()):
                 prefix = f"g5_{clips[i]['start'].replace(':', '')}_{i}"
                 srt = srt_files.get(i)
                 fut = pool.submit(
-                    apply_gaming_pip_filter,
+                    filter_fn,
                     downloaded[i], srt, facecam_position, prefix
                 )
                 futures[fut] = i
@@ -312,7 +454,8 @@ def process_gaming_compilation(url: str, clips: list[dict],
             "size_mb": round(final_size, 1),
             "clips_processed": len(filtered),
             "total_clips": n,
-            "facecam_position": facecam_position
+            "facecam_position": facecam_position,
+            "layout": layout
         }
 
     finally:

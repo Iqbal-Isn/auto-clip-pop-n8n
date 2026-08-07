@@ -83,7 +83,8 @@ def yt_dlp_cmd():
     """Return base yt-dlp command, dengan cookies jika file tersedia"""
     scripts_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
     yt_dlp_exe = _find_exe("yt-dlp", [scripts_dir])
-    cmd = [yt_dlp_exe, "--ffmpeg-location", FFMPEG_EXE, "--progress", "--newline"]
+    cmd = [yt_dlp_exe, "--ffmpeg-location", FFMPEG_EXE, "--progress", "--newline",
+           "--js-runtimes", "node", "--remote-components", "ejs:github"]
     if os.path.exists(COOKIES_PATH):
         cmd += ["--cookies", COOKIES_PATH]
         print("🍪 Menggunakan cookies YouTube")

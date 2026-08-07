@@ -6,3 +6,4 @@ test.py
 .env
 .claude
 __pycache__/
+bridge-clipping-oldv.py

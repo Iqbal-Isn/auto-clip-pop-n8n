@@ -46,26 +46,33 @@ def concat_with_transitions(clip_paths: list[str], output: str) -> str:
         print(f"  Klip #{i+1}: {d:.1f}s")
 
     # 2. Bangun filter_complex untuk semua input
+    #    -fflags +genpts → regen PTS saat baca file (hindari "Late SEI" corrupt)
     inputs = []
     for p in clip_paths:
-        inputs += ["-i", p]
+        inputs += ["-fflags", "+genpts", "-i", p]
 
     vid_streams = []
     aud_streams = []
     vid_filters = []
     aud_filters = []
 
+    # Normalisasi setiap input: fps=30 + setpts=PTS-STARTPTS → CFR & PTS bersih
     for i in range(n):
-        vid_streams.append(f"[{i}:v]")
+        vid_filters.append(
+            f"[{i}:v]fps=30,setpts=PTS-STARTPTS[v{i}_clean]"
+        )
+        vid_streams.append(f"[v{i}_clean]")
         aud_streams.append(f"[{i}:a]")
 
     # Chain xfade video
+    # xfade output duration = prev_output_dur + next_clip_dur - transition_dur
+    # offset = prev_output_dur - transition_dur (titik mulai transisi di output sebelumnya)
     curr_vid = vid_streams[0]
-    cum_dur = durs[0]
+    output_dur = durs[0]  # durasi output kumulatif setelah setiap xfade
 
     for i in range(1, n):
         tr = _TRANSITIONS[i - 1] if (i - 1) < len(_TRANSITIONS) else _TRANSITIONS[-1]
-        offset = cum_dur - tr["vid_dur"]
+        offset = output_dur - tr["vid_dur"]
         next_label = f"v{i}" if i < n - 1 else "v"
         vid_filters.append(
             f"{curr_vid}{vid_streams[i]}"
@@ -73,15 +80,12 @@ def concat_with_transitions(clip_paths: list[str], output: str) -> str:
             f"[{next_label}]"
         )
         curr_vid = f"[{next_label}]"
-        cum_dur += durs[i]
+        output_dur = output_dur + durs[i] - tr["vid_dur"]
 
-    # Chain acrossfade audio
+    # Chain acrossfade audio (acrossfade auto-overlap, tidak perlu offset)
     curr_aud = aud_streams[0]
-    cum_dur = durs[0]
-
     for i in range(1, n):
         tr = _TRANSITIONS[i - 1] if (i - 1) < len(_TRANSITIONS) else _TRANSITIONS[-1]
-        offset = cum_dur - tr["aud_dur"]
         next_label = f"a{i}" if i < n - 1 else "a"
         aud_filters.append(
             f"{curr_aud}{aud_streams[i]}"
@@ -89,14 +93,11 @@ def concat_with_transitions(clip_paths: list[str], output: str) -> str:
             f"[{next_label}]"
         )
         curr_aud = f"[{next_label}]"
-        cum_dur += durs[i]
 
     filter_complex = ";".join(vid_filters + aud_filters)
 
-    # Total durasi estimasi
-    total_dur = sum(durs) - sum(
-        _TRANSITIONS[i]["vid_dur"] for i in range(min(n - 1, len(_TRANSITIONS)))
-    )
+    # Total durasi estimasi (pakai output_dur terakhir dari xfade chain)
+    total_dur = output_dur
     print(f"  Total durasi: ~{total_dur:.1f}s ({total_dur / 60:.1f} menit)")
 
     subprocess.run([

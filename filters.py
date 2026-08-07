@@ -19,8 +19,8 @@ def get_facecam_crop(video_path: str, position: str = "btmleft"):
     vid_h = int(result[1])
     print(f"📐 Video: {vid_w}x{vid_h}")
 
-    cam_w = int(vid_w * 0.40)
-    cam_h = int(vid_h * 0.45)
+    cam_w = int(vid_w * 0.22)
+    cam_h = int(vid_h * 0.30)
 
     pos = FACECAM_POSITIONS.get(position, FACECAM_POSITIONS["btmleft"])
     cam_x = vid_w - cam_w if pos["x"] == "right" else 0
@@ -33,8 +33,8 @@ def get_facecam_crop(video_path: str, position: str = "btmleft"):
 def apply_gaming_pip_filter(video_path: str, srt_file: str | None,
                             facecam_position: str, prefix: str) -> str:
     """
-    Gaming 50/50 filter:
-    - Top 50% (1080×960): Facecam crop → hqdn3d denoise → unsharp → scale
+    Gaming 50/50 split filter:
+    - Top 50% (1080×960): Facecam crop → denoise → upscale → sharpen
     - Bottom 50% (1080×960): Gameplay fullscreen → scale
     - vstack → 1080×1920, subtitle dibakar di atas komposit
     """
@@ -52,30 +52,173 @@ def apply_gaming_pip_filter(video_path: str, srt_file: str | None,
     video_filter = (
         # Split source ke 2 stream
         f"[0:v]split[main][cam_raw];"
-        # Facecam (TOP 50%): crop → scale 2x → sharpen → scale final
+        # Facecam (TOP 50%): crop → denoise → high-quality upscale → sharpen
         f"[cam_raw]crop={cw}:{ch}:{cx}:{cy},"
-        f"scale=iw*2:ih*2:flags=lanczos,"
-        f"cas=0.5,"
-        f"scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop=1080:960,setsar=1[top];"
+        f"hqdn3d=3:2:5:3,"
+        f"scale=1080:960:flags=lanczos:force_original_aspect_ratio=increase,"
+        f"crop=1080:960,"
+        f"unsharp=5:5:1.0:5:5:0.5,"
+        f"cas=0.4,"
+        f"setsar=1[top];"
         # Gameplay (BOTTOM 50%): full frame → scale ke 1080×960
-        f"[main]scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"[main]scale=1080:960:flags=lanczos:force_original_aspect_ratio=increase,"
         f"crop=1080:960,setsar=1[bottom];"
         # Stack: facecam atas, gameplay bawah
         f"[top][bottom]vstack=inputs=2[comp];"
+        # Force CFR + normalize PTS → mencegah frame drop saat xfade concat
+        f"[comp]fps=30,setpts=PTS-STARTPTS[comp_cfr];"
     )
 
     # Subtitle (jika ada)
     if srt_file:
-        video_filter += f"[comp]{sub_chain}[v]"
+        video_filter += f"[comp_cfr]{sub_chain}[v]"
     else:
-        video_filter += f"[comp]null[v]"
+        video_filter += f"[comp_cfr]null[v]"
 
     subprocess.run([
-        FFMPEG_EXE, "-i", video_path,
+        FFMPEG_EXE, "-fflags", "+genpts", "-i", video_path,
         "-filter_complex", video_filter,
         "-map", "[v]", "-map", "0:a?",
         "-c:v", "libx264", "-crf", "20", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        tmp_merged, "-y"
+    ], check=True)
+
+    return tmp_merged
+
+
+def apply_gaming_pip_overlay_filter(video_path: str, srt_file: str | None,
+                                    facecam_position: str, prefix: str) -> str:
+    """
+    Gaming PiP overlay filter — facecam sebagai overlay kecil di pojok:
+    - Gameplay fullscreen 1080×1920 (crop vertical from horizontal)
+    - Facecam crop 22%×30% → overlay di pojok (500px lebar)
+    - Subtitle dibakar di atas semuanya
+
+    Crop lebih kecil + upscale lanczos = streamer lebih besar & tajam.
+    """
+    tmp_merged = os.path.join(TMP_DIR, f"merged_{prefix}.mp4")
+
+    cx, cy, cw, ch = get_facecam_crop(video_path, facecam_position)
+    cam_pos = FACECAM_POSITIONS.get(facecam_position, FACECAM_POSITIONS["btmleft"])
+
+    # ⚙️ Ukuran display facecam (bisa diedit)
+    FACECAM_SIZE = "500"
+
+    # Posisi overlay facecam (20px margin dari tepi)
+    overlay_x = "W-w-20" if cam_pos["x"] == "right" else "20"
+    overlay_y = "H-h-20" if cam_pos["y"] == "bottom" else "20"
+
+    # ASS subtitle chain
+    sub_chain = ""
+    if srt_file:
+        srt_escaped = srt_file.replace('\\', '/').replace(':', '\\:')
+        sub_chain = f"ass='{srt_escaped}'"
+
+    # Build filter_complex
+    video_filter = (
+        # Split source: main gameplay + facecam
+        f"[0:v]split[main][cam_raw];"
+        # Gameplay: scale ke 1080×1920 (crop horizontal → vertical)
+        f"[main]scale=1080:1920:flags=lanczos:force_original_aspect_ratio=increase,"
+        f"crop=1080:1920,setsar=1[bg];"
+        # Facecam: crop → denoise → upscale lanczos → sharpen
+        f"[cam_raw]crop={cw}:{ch}:{cx}:{cy},"
+        f"hqdn3d=3:2:5:3,"
+        f"scale={FACECAM_SIZE}:-1:flags=lanczos,"
+        f"unsharp=5:5:1.0:5:5:0.5,"
+        f"cas=0.3,"
+        f"setsar=1[cam];"
+        # Overlay facecam di pojok gameplay
+        f"[bg][cam]overlay={overlay_x}:{overlay_y}[comp];"
+        # Force CFR + normalize PTS
+        f"[comp]fps=30,setpts=PTS-STARTPTS[comp_cfr];"
+    )
+
+    # Subtitle (jika ada)
+    if srt_file:
+        video_filter += f"[comp_cfr]{sub_chain}[v]"
+    else:
+        video_filter += f"[comp_cfr]null[v]"
+
+    subprocess.run([
+        FFMPEG_EXE, "-fflags", "+genpts", "-i", video_path,
+        "-filter_complex", video_filter,
+        "-map", "[v]", "-map", "0:a?",
+        "-c:v", "libx264", "-crf", "20", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        tmp_merged, "-y"
+    ], check=True)
+
+    return tmp_merged
+
+
+def apply_gaming_normal_overlay_filter(video_path: str, srt_file: str | None,
+                                        facecam_position: str, prefix: str) -> str:
+    """
+    Gaming "Normal" layout:
+    - Background blur 1080×1920 (dari gameplay yang sama)
+    - Gameplay 4:3 (1080×810) centered, tidak blur
+    - Facecam overlay 480px di pojok gameplay box (nempel tepi)
+    - Subtitle dibakar di atas komposit
+
+    MINIMAL PROCESSING: light denoise → high-quality scale → light sharpen.
+    Prinsip: source jelek + proses berat = makin blur. Lebih baik simpel.
+    """
+    tmp_merged = os.path.join(TMP_DIR, f"merged_{prefix}.mp4")
+
+    cx, cy, cw, ch = get_facecam_crop(video_path, facecam_position)
+    cam_pos = FACECAM_POSITIONS.get(facecam_position, FACECAM_POSITIONS["btmright"])
+
+    # ⚙️ Ukuran display facecam (bisa diedit)
+    FACECAM_SIZE = "480"
+
+    # Posisi overlay facecam di dalam gameplay box (1080×810) — nempel tepi
+    overlay_x = "W-w" if cam_pos["x"] == "right" else "0"
+    overlay_y = "H-h" if cam_pos["y"] == "bottom" else "0"
+
+    # ASS subtitle chain
+    sub_chain = ""
+    if srt_file:
+        srt_escaped = srt_file.replace('\\', '/').replace(':', '\\:')
+        sub_chain = f"ass='{srt_escaped}'"
+
+    # Build filter_complex
+    video_filter = (
+        # Split source ke 3 stream: gameplay, facecam raw, background
+        f"[0:v]split=3[main][cam_raw][bg_raw];"
+        # Background: scale → blur penuh 1080×1920
+        f"[bg_raw]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop=1080:1920,boxblur=15:15,setsar=1[bg];"
+        # Gameplay 4:3: scale ke 1080×810, centered (tidak blur)
+        f"[main]scale=1080:810:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop=1080:810,setsar=1[fg];"
+        # Facecam: MINIMAL — light denoise → scale → light sharpen
+        f"[cam_raw]crop={cw}:{ch}:{cx}:{cy},"
+        f"scale={FACECAM_SIZE}:-1:flags=lanczos+accurate_rnd,"
+        f"unsharp=3:3:0.6:3:3:0.4,"
+        f"cas=0.2,"
+        f"setsar=1[cam];"
+        # Overlay facecam di pojok gameplay box (bukan di canvas)
+        f"[fg][cam]overlay={overlay_x}:{overlay_y}[fg_with_cam];"
+        # Overlay gameplay+facecam di tengah background blur
+        f"[bg][fg_with_cam]overlay=(W-w)/2:(H-h)/2[comp];"
+        # Force CFR + normalize PTS
+        f"[comp]fps=30,setpts=PTS-STARTPTS[comp_cfr];"
+    )
+
+    # Subtitle (jika ada)
+    if srt_file:
+        video_filter += f"[comp_cfr]{sub_chain}[v]"
+    else:
+        video_filter += f"[comp_cfr]null[v]"
+
+    subprocess.run([
+        FFMPEG_EXE, "-fflags", "+genpts", "-i", video_path,
+        "-filter_complex", video_filter,
+        "-map", "[v]", "-map", "0:a?",
+        "-c:v", "libx264", "-crf", "17", "-preset", "slower", "-pix_fmt", "yuv420p",
+        "-tune", "film",
         "-c:a", "aac", "-b:a", "128k",
         tmp_merged, "-y"
     ], check=True)
@@ -103,18 +246,26 @@ def apply_tiktok_filter(video_path: str, srt_file: str | None,
             video_filter = (
                 f"[0:v]{sub_chain}[subbed];"
                 f"[subbed]crop={cw}:{ch}:{cx}:{cy},"
-                f"scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
-                f"crop=1080:960,setsar=1[top];"
-                f"[subbed]scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"hqdn3d=3:2:5:3,"
+                f"scale=1080:960:flags=lanczos:force_original_aspect_ratio=increase,"
+                f"crop=1080:960,"
+                f"unsharp=5:5:1.0:5:5:0.5,"
+                f"cas=0.3,"
+                f"setsar=1[top];"
+                f"[subbed]scale=1080:960:flags=lanczos:force_original_aspect_ratio=increase,"
                 f"crop=1080:960,setsar=1[bottom];"
                 f"[top][bottom]vstack=inputs=2[v]"
             )
         else:
             video_filter = (
                 f"[0:v]crop={cw}:{ch}:{cx}:{cy},"
-                f"scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
-                f"crop=1080:960,setsar=1[top];"
-                f"[0:v]scale=1080:960:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"hqdn3d=3:2:5:3,"
+                f"scale=1080:960:flags=lanczos:force_original_aspect_ratio=increase,"
+                f"crop=1080:960,"
+                f"unsharp=5:5:1.0:5:5:0.5,"
+                f"cas=0.3,"
+                f"setsar=1[top];"
+                f"[0:v]scale=1080:960:flags=lanczos:force_original_aspect_ratio=increase,"
                 f"crop=1080:960,setsar=1[bottom];"
                 f"[top][bottom]vstack=inputs=2[v]"
             )
@@ -123,16 +274,16 @@ def apply_tiktok_filter(video_path: str, srt_file: str | None,
         if srt_file:
             video_filter = (
                 "[0:v]split[orig_raw][bg];"
-                "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,boxblur=15:15[blurred];"
-                f"[orig_raw]scale=1080:1080:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1080[scaled];"
+                "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=spline,crop=1080:1920,boxblur=15:15[blurred];"
+                f"[orig_raw]scale=1080:1080:force_original_aspect_ratio=increase:flags=spline,crop=1080:1080[scaled];"
                 f"[scaled]{sub_chain}[fg];"
                 "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
             )
         else:
             video_filter = (
                 "[0:v]split[orig][bg];"
-                "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,boxblur=15:15[blurred];"
-                "[orig]scale=1080:1080:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1080[fg];"
+                "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=spline,crop=1080:1920,boxblur=15:15[blurred];"
+                "[orig]scale=1080:1080:force_original_aspect_ratio=increase:flags=spline,crop=1080:1080[fg];"
                 "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
             )
 

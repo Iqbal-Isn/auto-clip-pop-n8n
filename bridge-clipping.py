@@ -104,21 +104,23 @@ async def cut_gaming_compilation(request: GamingCompilationRequest):
         {"start": "00:01:30", "end": "00:02:00"},
         ... (5 momen)
       ],
-      "facecam_position": "btmleft"
+      "facecam_position": "btmleft",
+      "layout": "split"         // "split" (default) atau "pip" (facecam overlay kecil, lebih tajam)
     }
     Response:
     {
       "status": "success",
-      "file": "gaming_compilation.mp4",
+      "file": "gaming_compilation_20260805_143025.mp4",
       "size_mb": 45.2,
       "clips_processed": 5,
       "total_clips": 5,
-      "facecam_position": "btmleft"
+      "facecam_position": "btmleft",
+      "layout": "pip"
     }
     """
     try:
         result = process_gaming_compilation(
-            request.url, request.clips, request.facecam_position
+            request.url, request.clips, request.facecam_position, request.layout
         )
         return result
     except Exception as e:
