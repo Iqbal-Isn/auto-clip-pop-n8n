@@ -7,7 +7,7 @@ from datetime import datetime
 from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, OUTPUT_DIR, yt_dlp_cmd
 from utils import seconds_to_hhmmss, hhmmss_to_seconds
 from subtitles import transcribe_audio, create_ass_from_whisper
-from filters import apply_tiktok_filter, apply_gaming_pip_filter, apply_gaming_pip_overlay_filter, apply_gaming_normal_overlay_filter
+from filters import apply_tiktok_filter, apply_gaming_filter
 from transitions import concat_with_transitions, compress_to_target
 
 
@@ -246,8 +246,11 @@ def _process_single_clip_full(url: str, start_str: str, end_str: str,
         _download_section(url, start_sec, end_sec, tmp_yt)
         source_h264 = tmp_yt
 
-        # Step 2: Whisper subtitle
-        srt_file = _whisper_subtitle(source_h264, prefix)
+        # Step 2: Whisper subtitle (skip untuk mode gaming)
+        if mode.lower() != "gaming":
+            srt_file = _whisper_subtitle(source_h264, prefix)
+        else:
+            print(f"🎮 Mode GAMING — skip Whisper subtitle")
 
         # Step 3: TikTok filter
         tmp_merged = apply_tiktok_filter(source_h264, srt_file, mode, prefix)
@@ -325,24 +328,18 @@ def cut_video_task(url: str, start: str, end: str, mode: str = "normal"):
 # ─────────────────────────────────────────
 
 def process_gaming_compilation(url: str, clips: list[dict],
-                                facecam_position: str = "btmleft",
-                                layout: str = "split") -> dict:
+                                facecam_position: str = "btmleft") -> dict:
     """
-    Proses 5 klip gaming:
+    Proses N klip gaming:
     1. Parallel --download-sections (3 workers, CEPAT)
-    2. Sequential Whisper (thread-safety)
-    3. Parallel PiP filter + encode (3 workers)
+    2. Whisper SKIP — mode gaming tanpa auto subtitle
+    3. Parallel gaming filter + encode (3 workers)
     4. Concat dengan xfade transitions → 1 video final
-
-    Args:
-        layout: "split" = 50/50 facecam atas + gameplay bawah (default)
-                "pip"   = gameplay fullscreen + facecam overlay kecil di pojok (lebih tajam)
-                "normal-gaming" = blur bg + gameplay 4:3 centered + facecam overlay di pojok gameplay
     """
     n = len(clips)
     print(f"\n{'='*50}")
     print(f"🎮 GAMING COMPILATION: {n} klip → 1 video")
-    print(f"📐 Facecam position: {facecam_position.upper()} | Layout: {layout.upper()}")
+    print(f"📐 Facecam position: {facecam_position.upper()}")
     for i, seg in enumerate(clips):
         print(f"  Klip #{i+1}: {seg['start']} → {seg['end']}")
     print(f"{'='*50}\n")
@@ -383,45 +380,19 @@ def process_gaming_compilation(url: str, clips: list[dict],
             raise RuntimeError("Semua download gagal — tidak bisa melanjutkan")
         print(f"  📊 {len(downloaded)}/{n} berhasil didownload\n")
 
-        # ═══ STEP 2: Sequential Whisper (thread-safety model) ═══
-        print("🔊 STEP 2: Whisper transcribe (sequential)...")
-        srt_files = {}  # idx → path
-        for i in sorted(downloaded.keys()):
-            prefix = f"g5_{clips[i]['start'].replace(':', '')}_{i}"
-            try:
-                srt = _whisper_subtitle(
-                    downloaded[i], prefix,
-                    ass_width=1080, ass_height=1920,  # canvas 9:16
-                    ass_margin_v=120  # margin tinggi — hindari tumpang tindih dgn facecam
-                )
-                if srt:
-                    srt_files[i] = srt
-                    temp_files.append(srt)
-                    print(f"  ✅ Klip #{i+1}: {srt}")
-                else:
-                    print(f"  ⚠️ Klip #{i+1}: tanpa subtitle")
-            except Exception as e:
-                print(f"  ⚠️ Klip #{i+1} Whisper GAGAL: {e}")
-        print(f"  📊 {len(srt_files)}/{len(downloaded)} subtitle siap\n")
+        # ═══ STEP 2: Whisper SKIP — mode gaming tidak pakai auto subtitle ═══
+        print("🔇 STEP 2: Whisper SKIP — gaming mode tanpa auto subtitle\n")
+        srt_files = {}  # idx → path — selalu kosong untuk gaming
 
-        # ═══ STEP 3: Parallel PiP filter + encode (max 3 — CPU bound) ═══
-        if layout == "pip":
-            filter_fn = apply_gaming_pip_overlay_filter
-            layout_label = "PiP overlay"
-        elif layout == "normal-gaming":
-            filter_fn = apply_gaming_normal_overlay_filter
-            layout_label = "Normal Gaming (blur + 4:3 + facecam)"
-        else:
-            filter_fn = apply_gaming_pip_filter
-            layout_label = "50/50 split"
-        print(f"🎨 STEP 3: {layout_label} filter + encode (parallel)...")
+        # ═══ STEP 3: Gaming filter + encode (parallel, 3 workers — CPU bound) ═══
+        print("🎨 STEP 3: Gaming filter + encode (parallel)...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             futures = {}
             for i in sorted(downloaded.keys()):
                 prefix = f"g5_{clips[i]['start'].replace(':', '')}_{i}"
                 srt = srt_files.get(i)
                 fut = pool.submit(
-                    filter_fn,
+                    apply_gaming_filter,
                     downloaded[i], srt, facecam_position, prefix
                 )
                 futures[fut] = i
@@ -454,8 +425,7 @@ def process_gaming_compilation(url: str, clips: list[dict],
             "size_mb": round(final_size, 1),
             "clips_processed": len(filtered),
             "total_clips": n,
-            "facecam_position": facecam_position,
-            "layout": layout
+            "facecam_position": facecam_position
         }
 
     finally:

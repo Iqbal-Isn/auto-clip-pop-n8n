@@ -20,4 +20,3 @@ class GamingCompilationRequest(BaseModel):
     url: str
     clips: list[dict]  # [{"start": "HH:MM:SS", "end": "HH:MM:SS"}, ...]  (5 momen)
     facecam_position: str = "btmleft"  # "btmleft" | "btmright" | "topleft" | "topright"
-    layout: str = "normal-gaming"  # "normal-gaming" = blur bg + 4:3 gameplay + facecam, "split" = 50/50, "pip" = overlay kecil

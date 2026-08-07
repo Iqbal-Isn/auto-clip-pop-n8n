@@ -6,7 +6,7 @@ Struktur modul:
   models.py      → Pydantic request models
   utils.py       → time conversion, video_id extraction
   subtitles.py   → SRT, ASS karaoke, Whisper transcribe
-  filters.py     → facecam crop, TikTok layout, gaming 50/50 PiP
+  filters.py     → facecam crop, TikTok layout, gaming filter
   transitions.py → xfade concat, compress to target
   pipeline.py    → orkestrasi download, single-clip, gaming compilation
 """
@@ -96,7 +96,7 @@ async def cut_video_batch(request: BatchClipRequest):
 @app.post("/cut-gaming-compilation")
 async def cut_gaming_compilation(request: GamingCompilationRequest):
     """
-    Endpoint kompilasi gaming: 5 klip → 1 video dengan transisi.
+    Endpoint kompilasi gaming: N klip → 1 video dengan transisi.
     Request body:
     {
       "url": "https://youtube.com/watch?v=xxx",
@@ -104,8 +104,7 @@ async def cut_gaming_compilation(request: GamingCompilationRequest):
         {"start": "00:01:30", "end": "00:02:00"},
         ... (5 momen)
       ],
-      "facecam_position": "btmleft",
-      "layout": "split"         // "split" (default) atau "pip" (facecam overlay kecil, lebih tajam)
+      "facecam_position": "btmleft"
     }
     Response:
     {
@@ -114,13 +113,12 @@ async def cut_gaming_compilation(request: GamingCompilationRequest):
       "size_mb": 45.2,
       "clips_processed": 5,
       "total_clips": 5,
-      "facecam_position": "btmleft",
-      "layout": "pip"
+      "facecam_position": "btmleft"
     }
     """
     try:
         result = process_gaming_compilation(
-            request.url, request.clips, request.facecam_position, request.layout
+            request.url, request.clips, request.facecam_position
         )
         return result
     except Exception as e:
