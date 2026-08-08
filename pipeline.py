@@ -4,7 +4,7 @@ import os
 import subprocess
 import concurrent.futures
 from datetime import datetime
-from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, OUTPUT_DIR, yt_dlp_cmd
+from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, OUTPUT_DIR, TRANSISI_SOUND, yt_dlp_cmd
 from utils import seconds_to_hhmmss, hhmmss_to_seconds
 from subtitles import transcribe_audio, create_ass_from_whisper
 from filters import apply_tiktok_filter, apply_gaming_filter
@@ -414,7 +414,7 @@ def process_gaming_compilation(url: str, clips: list[dict],
         # ═══ STEP 4: Concat dengan transisi ═══
         print("🔗 STEP 4: Concat dengan transisi...")
         ordered_paths = [filtered[i] for i in sorted(filtered.keys())]
-        concat_with_transitions(ordered_paths, output)
+        concat_with_transitions(ordered_paths, output, TRANSISI_SOUND)
 
         final_size = os.path.getsize(output) / (1024 * 1024)
         print(f"\n✅ KOMPILASI SELESAI: {output} ({final_size:.1f}MB)")

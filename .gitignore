@@ -7,3 +7,4 @@ test.py
 .claude
 __pycache__/
 bridge-clipping-oldv.py
+prompt.txt
