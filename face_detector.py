@@ -8,12 +8,16 @@ Model ONNX ~350KB, auto-download.
 
 import os
 import subprocess
+import threading
 import cv2
 import numpy as np
 from config import (
     FFMPEG_EXE, FFPROBE_EXE, TMP_DIR,
     FACECAM_OUTPUT_SIZE, FACE_DETECTION_SAMPLES
 )
+
+# Thread lock — YuNet tidak thread-safe untuk concurrent detect()
+_yunet_lock = threading.Lock()
 
 # ─────────────────────────────────────────
 # YUNET MODEL (auto-download jika belum ada)
@@ -130,9 +134,10 @@ def _detect_faces_in_image(image_bgr):
         image_bgr = cv2.resize(image_bgr, (new_w, new_h),
                                interpolation=cv2.INTER_LANCZOS4)
 
-    # Set input size dan detect
+    # Set input size dan detect (THREAD-SAFE: lock untuk hindari crash)
     detector.setInputSize((image_bgr.shape[1], image_bgr.shape[0]))
-    status, faces = detector.detect(image_bgr)
+    with _yunet_lock:
+        status, faces = detector.detect(image_bgr)
 
     faces_list = []
     if status and faces is not None and len(faces) > 0:
