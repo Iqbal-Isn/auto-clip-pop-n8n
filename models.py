@@ -19,4 +19,4 @@ class BatchClipRequest(BaseModel):
 class GamingCompilationRequest(BaseModel):
     url: str
     clips: list[dict]  # [{"start": "HH:MM:SS", "end": "HH:MM:SS"}, ...]  (5 momen)
-    facecam_position: str = "btmleft"  # "btmleft" | "btmright" | "topleft" | "topright"
+    facecam_position: str = "btmleft"  # "btmleft"|"btmright"|"topleft"|"topright"|"leftmid"|"rightmid"|"topmid"|"btmmid"

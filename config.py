@@ -39,11 +39,24 @@ def get_whisper_model():
 # ─────────────────────────────────────────
 
 FACECAM_POSITIONS = {
-    "btmleft":  {"x": "left",   "y": "bottom"},
-    "btmright": {"x": "right",  "y": "bottom"},
-    "topleft":  {"x": "left",   "y": "top"},
-    "topright": {"x": "right",  "y": "top"},
+    # 4 corners
+    "btmleft":   {"x": "left",   "y": "bottom"},
+    "btmright":  {"x": "right",  "y": "bottom"},
+    "topleft":   {"x": "left",   "y": "top"},
+    "topright":  {"x": "right",  "y": "top"},
+    # 4 edges (tengah)
+    "leftmid":   {"x": "left",   "y": "middle"},
+    "rightmid":  {"x": "right",  "y": "middle"},
+    "topmid":    {"x": "middle", "y": "top"},
+    "btmmid":    {"x": "middle", "y": "bottom"},
 }
+
+# ─────────────────────────────────────────
+# FACE DETECTION (MediaPipe)
+# ─────────────────────────────────────────
+FACECAM_OUTPUT_SIZE = 200         # ukuran crop facecam (px) — square
+FACE_DETECTION_CONFIDENCE = 0.5   # threshold confidence MediaPipe
+FACE_DETECTION_SAMPLES = 5        # jumlah sample frame untuk deteksi
 
 
 # ─────────────────────────────────────────

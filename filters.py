@@ -3,10 +3,27 @@
 import os
 import subprocess
 from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, FACECAM_POSITIONS, WATERMARK_PATH
+from face_detector import find_largest_face_in_corners, calculate_face_crop
 
 
-def get_facecam_crop(video_path: str, position: str = "btmleft"):
-    """Deteksi posisi & ukuran facecam berdasarkan resolusi video."""
+def get_facecam_crop(video_path: str, position: str = "btmleft",
+                     auto_detect: bool = True):
+    """
+    Deteksi posisi & ukuran facecam.
+
+    Auto-detect (default):
+      - Cari wajah terbesar di 4 pojok frame (Haar Cascade)
+      - Crop adaptif centered pada wajah itu (150-300px sesuai ukuran wajah)
+      - Kalau gagal -> fallback ke posisi manual
+
+    Manual (fallback):
+      - Crop region 22%x30% dari frame sesuai FACECAM_POSITIONS
+
+    Returns (crop_x, crop_y, crop_w, crop_h, corner, is_auto)
+      - corner: "btmright" | "btmleft" | "topleft" | "topright"
+      - is_auto: True jika hasil auto-deteksi, False jika fallback
+    """
+    # -- ffprobe: resolusi video --
     result = subprocess.check_output([
         FFPROBE_EXE, "-v", "error",
         "-select_streams", "v:0",
@@ -17,17 +34,75 @@ def get_facecam_crop(video_path: str, position: str = "btmleft"):
 
     vid_w = int(result[0])
     vid_h = int(result[1])
-    print(f"📐 Video: {vid_w}x{vid_h}")
+    print(f"[facecam] Video: {vid_w}x{vid_h}")
 
+    # === 1. Auto face detection ===
+    if auto_detect:
+        face_result = find_largest_face_in_corners(video_path)
+        if face_result:
+            fx, fy, fw, fh = face_result["face_bbox"]
+            corner = face_result["corner"]
+
+            # Hitung region facecam (22% x 30%) untuk clamping
+            region_w = int(vid_w * 0.22)
+            region_h = int(vid_h * 0.30)
+            pos = FACECAM_POSITIONS.get(corner, FACECAM_POSITIONS["btmleft"])
+            if pos["x"] == "right":
+                region_x = vid_w - region_w
+            elif pos["x"] == "middle":
+                region_x = (vid_w - region_w) // 2
+            else:
+                region_x = 0
+            if pos["y"] == "bottom":
+                region_y = vid_h - region_h
+            elif pos["y"] == "middle":
+                region_y = (vid_h - region_h) // 2
+            else:
+                region_y = 0
+
+            # Crop centered pada wajah, clamp ke region facecam
+            cx, cy, cw, ch = calculate_face_crop(
+                (fx, fy, fw, fh), vid_w, vid_h)
+
+            if cw > region_w or ch > region_h:
+                # Crop lebih besar dari region -> pakai seluruh region
+                cx, cy, cw, ch = region_x, region_y, region_w, region_h
+            else:
+                # Clamp dalam region
+                cx = max(cx, region_x)
+                cy = max(cy, region_y)
+                if cx + cw > region_x + region_w:
+                    cx = region_x + region_w - cw
+                if cy + ch > region_y + region_h:
+                    cy = region_y + region_h - ch
+
+            crop = (cx, cy, cw, ch)
+
+            print(f"[facecam] Auto facecam -> pojok {corner}, "
+                  f"region=({region_x},{region_y},{region_w},{region_h}), "
+                  f"crop_clamped={crop}")
+            return (*crop, corner, True)
+
+    # === 2. Fallback: posisi manual ===
     cam_w = int(vid_w * 0.22)
     cam_h = int(vid_h * 0.30)
 
     pos = FACECAM_POSITIONS.get(position, FACECAM_POSITIONS["btmleft"])
-    cam_x = vid_w - cam_w if pos["x"] == "right" else 0
-    cam_y = vid_h - cam_h if pos["y"] == "bottom" else 0
+    if pos["x"] == "right":
+        cam_x = vid_w - cam_w
+    elif pos["x"] == "middle":
+        cam_x = (vid_w - cam_w) // 2
+    else:
+        cam_x = 0
+    if pos["y"] == "bottom":
+        cam_y = vid_h - cam_h
+    elif pos["y"] == "middle":
+        cam_y = (vid_h - cam_h) // 2
+    else:
+        cam_y = 0
 
-    print(f"✅ Facecam ({position}) → x={cam_x} y={cam_y} w={cam_w} h={cam_h}")
-    return (cam_x, cam_y, cam_w, cam_h)
+    print(f"[facecam] Fallback ({position}) -> x={cam_x} y={cam_y} w={cam_w} h={cam_h}")
+    return (cam_x, cam_y, cam_w, cam_h, position, False)
 
 
 def apply_gaming_filter(video_path: str, srt_file: str | None,
@@ -44,15 +119,29 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
     """
     tmp_merged = os.path.join(TMP_DIR, f"merged_{prefix}.mp4")
 
-    cx, cy, cw, ch = get_facecam_crop(video_path, facecam_position)
-    cam_pos = FACECAM_POSITIONS.get(facecam_position, FACECAM_POSITIONS["btmright"])
+    cx, cy, cw, ch, detected_corner, is_auto = \
+        get_facecam_crop(video_path, facecam_position)
 
-    # ⚙️ Ukuran display facecam (bisa diedit)
+    # Overlay ikuti pojok hasil deteksi (auto) atau fallback config
+    overlay_corner = detected_corner if is_auto else facecam_position
+    cam_pos = FACECAM_POSITIONS.get(overlay_corner, FACECAM_POSITIONS["btmright"])
+
+    # Ukuran display facecam (bisa diedit)
     FACECAM_SIZE = "360"
 
-    # Posisi overlay facecam di dalam gameplay box (1080×810) — nempel tepi
-    overlay_x = "W-w" if cam_pos["x"] == "right" else "0"
-    overlay_y = "H-h" if cam_pos["y"] == "bottom" else "0"
+    # Posisi overlay facecam di dalam gameplay box (1080x810) — nempel tepi
+    if cam_pos["x"] == "right":
+        overlay_x = "W-w"
+    elif cam_pos["x"] == "middle":
+        overlay_x = "(W-w)/2"
+    else:
+        overlay_x = "0"
+    if cam_pos["y"] == "bottom":
+        overlay_y = "H-h"
+    elif cam_pos["y"] == "middle":
+        overlay_y = "(H-h)/2"
+    else:
+        overlay_y = "0"
 
     # ASS subtitle chain
     sub_chain = ""
@@ -63,7 +152,7 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
     # Cek apakah watermark tersedia
     wm_available = os.path.exists(WATERMARK_PATH)
     if wm_available:
-        print(f"🔒 Watermark: {WATERMARK_PATH} (150px, tengah gameplay 4:3)")
+        print(f"[watermark] {WATERMARK_PATH} (150px, tengah gameplay 4:3)")
 
     # Build filter_complex
     video_filter = (
@@ -142,8 +231,8 @@ def apply_tiktok_filter(video_path: str, srt_file: str | None,
         sub_chain = f"ass='{srt_escaped}'"
 
     if mode.lower() == "gaming":
-        print(f"🎮 Mode GAMING ({prefix}) — facecam atas, full screen bawah...")
-        cx, cy, cw, ch = get_facecam_crop(video_path)
+        print(f"[tiktok] Mode GAMING ({prefix}) - facecam atas, full screen bawah...")
+        cx, cy, cw, ch, _, _ = get_facecam_crop(video_path)
         if srt_file:
             video_filter = (
                 f"[0:v]{sub_chain}[subbed];"
@@ -172,7 +261,7 @@ def apply_tiktok_filter(video_path: str, srt_file: str | None,
                 f"[top][bottom]vstack=inputs=2[v]"
             )
     else:
-        print(f"📺 Mode NORMAL ({prefix}) — blur background + foreground + subtitle...")
+        print(f"[tiktok] Mode NORMAL ({prefix}) - blur background + foreground + subtitle...")
         if srt_file:
             video_filter = (
                 "[0:v]split[orig_raw][bg];"
