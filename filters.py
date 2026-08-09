@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, FACECAM_POSITIONS, WATERMARK_PATH
+from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, FACECAM_POSITIONS, WATERMARK_PATH, FACECAM_OUTPUT_SIZE
 from face_detector import find_largest_face_in_corners, calculate_face_crop
 
 
@@ -60,23 +60,24 @@ def get_facecam_crop(video_path: str, position: str = "btmleft",
             else:
                 region_y = 0
 
-            # Crop centered pada wajah, clamp ke region facecam
-            cx, cy, cw, ch = calculate_face_crop(
-                (fx, fy, fw, fh), vid_w, vid_h)
+            # Crop persegi centered pada wajah, muat dalam region
+            face_cx = fx + fw // 2
+            face_cy = fy + fh // 2
+            crop_size = min(FACECAM_OUTPUT_SIZE, region_w, region_h)
+            half = crop_size // 2
 
-            if cw > region_w or ch > region_h:
-                # Crop lebih besar dari region -> pakai seluruh region
-                cx, cy, cw, ch = region_x, region_y, region_w, region_h
-            else:
-                # Clamp dalam region
-                cx = max(cx, region_x)
-                cy = max(cy, region_y)
-                if cx + cw > region_x + region_w:
-                    cx = region_x + region_w - cw
-                if cy + ch > region_y + region_h:
-                    cy = region_y + region_h - ch
+            cx = face_cx - half
+            cy = face_cy - half
 
-            crop = (cx, cy, cw, ch)
+            # Clamp ke region (face tetap se-centered mungkin)
+            cx = max(cx, region_x)
+            cy = max(cy, region_y)
+            if cx + crop_size > region_x + region_w:
+                cx = region_x + region_w - crop_size
+            if cy + crop_size > region_y + region_h:
+                cy = region_y + region_h - crop_size
+
+            crop = (cx, cy, crop_size, crop_size)
 
             print(f"[facecam] Auto facecam -> pojok {corner}, "
                   f"region=({region_x},{region_y},{region_w},{region_h}), "
