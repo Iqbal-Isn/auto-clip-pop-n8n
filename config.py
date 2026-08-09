@@ -16,6 +16,7 @@ if not os.path.exists(OUTPUT_DIR):
 
 COOKIES_PATH = "./youtube_cookies.txt"
 TRANSISI_SOUND = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transisi_sound.mpeg")
+WATERMARK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wm_mk.png")
 
 # ─────────────────────────────────────────
 # WHISPER (lazy load — hanya init sekali)

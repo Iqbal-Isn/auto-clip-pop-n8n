@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, FACECAM_POSITIONS
+from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, FACECAM_POSITIONS, WATERMARK_PATH
 
 
 def get_facecam_crop(video_path: str, position: str = "btmleft"):
@@ -36,7 +36,8 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
     Gaming layout:
     - Background blur 1080×1920 (dari gameplay yang sama)
     - Gameplay 4:3 (1080×810) centered, tidak blur
-    - Facecam overlay 480px di pojok gameplay box (nempel tepi)
+    - Watermark 150px di tengah gameplay box (jika wm_mk.png tersedia)
+    - Facecam overlay 360px di pojok gameplay box (nempel tepi, di atas watermark)
     - Subtitle dibakar di atas komposit (jika ada)
 
     MINIMAL PROCESSING: light denoise → high-quality scale → light sharpen.
@@ -59,6 +60,11 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
         srt_escaped = srt_file.replace('\\', '/').replace(':', '\\:')
         sub_chain = f"ass='{srt_escaped}'"
 
+    # Cek apakah watermark tersedia
+    wm_available = os.path.exists(WATERMARK_PATH)
+    if wm_available:
+        print(f"🔒 Watermark: {WATERMARK_PATH} (150px, tengah gameplay 4:3)")
+
     # Build filter_complex
     video_filter = (
         # Split source ke 3 stream: gameplay, facecam raw, background
@@ -75,8 +81,21 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
         f"unsharp=3:3:0.6:3:3:0.4,"
         f"cas=0.2,"
         f"setsar=1[cam];"
-        # Overlay facecam di pojok gameplay box (bukan di canvas)
-        f"[fg][cam]overlay={overlay_x}:{overlay_y}[fg_with_cam];"
+    )
+
+    # Watermark: scale 150px → overlay di tengah gameplay 4:3 (sebelum facecam)
+    if wm_available:
+        video_filter += (
+            f"[1:v]scale=150:-1:flags=lanczos,setsar=1[wm];"
+            f"[fg][wm]overlay=(W-w)/2:(H-h)/2[fg_with_wm];"
+            f"[fg_with_wm][cam]overlay={overlay_x}:{overlay_y}[fg_with_cam];"
+        )
+    else:
+        video_filter += (
+            f"[fg][cam]overlay={overlay_x}:{overlay_y}[fg_with_cam];"
+        )
+
+    video_filter += (
         # Overlay gameplay+facecam di tengah background blur
         f"[bg][fg_with_cam]overlay=(W-w)/2:(H-h)/2[comp];"
         # Force CFR + normalize PTS
@@ -89,15 +108,22 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
     else:
         video_filter += f"[comp_cfr]null[v]"
 
-    subprocess.run([
+    # Build ffmpeg command
+    cmd = [
         FFMPEG_EXE, "-fflags", "+genpts", "-i", video_path,
+    ]
+    if wm_available:
+        cmd += ["-i", WATERMARK_PATH]
+    cmd += [
         "-filter_complex", video_filter,
         "-map", "[v]", "-map", "0:a?",
         "-c:v", "libx264", "-crf", "17", "-preset", "slower", "-pix_fmt", "yuv420p",
         "-tune", "film",
         "-c:a", "aac", "-b:a", "128k",
         tmp_merged, "-y"
-    ], check=True)
+    ]
+
+    subprocess.run(cmd, check=True)
 
     return tmp_merged
 
