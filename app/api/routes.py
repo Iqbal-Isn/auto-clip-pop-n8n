@@ -1,32 +1,20 @@
-"""
-bridge-clipping — FastAPI app untuk auto-clip YouTube + subtitle + filter TikTok/gaming.
+"""API route handlers — transcript, single cut, batch cut, gaming compilation."""
 
-Struktur modul:
-  config.py      → paths, Whisper lazy-load, ffmpeg/yt-dlp discovery
-  models.py      → Pydantic request models
-  utils.py       → time conversion, video_id extraction
-  subtitles.py   → SRT, ASS karaoke, Whisper transcribe
-  filters.py     → facecam crop, TikTok layout, gaming filter
-  transitions.py → xfade concat, compress to target
-  pipeline.py    → orkestrasi download, single-clip, gaming compilation
-"""
-
-from fastapi import FastAPI
+from fastapi import APIRouter
 from youtube_transcript_api import YouTubeTranscriptApi
-import uvicorn
 
-from models import ClipRequest, BatchClipRequest, GamingCompilationRequest
-from utils import seconds_to_hhmmss, extract_video_id
-from pipeline import cut_video_task, _cut_video_impl, process_gaming_compilation
+from app.models.requests import ClipRequest, BatchClipRequest, GamingCompilationRequest
+from app.utils.helpers import seconds_to_hhmmss, extract_video_id
+from app.services.pipeline import cut_video_task, _cut_video_impl, process_gaming_compilation
 
-app = FastAPI()
+router = APIRouter()
 
 
 # ─────────────────────────────────────────
 # TRANSCRIPT
 # ─────────────────────────────────────────
 
-@app.get("/transcript")
+@router.get("/transcript")
 async def get_transcript(url: str):
     try:
         video_id = extract_video_id(url)
@@ -51,13 +39,13 @@ async def get_transcript(url: str):
 # ENDPOINTS
 # ─────────────────────────────────────────
 
-@app.post("/cut")
+@router.post("/cut")
 async def cut_video(request: ClipRequest):
     result = cut_video_task(request.url, request.start, request.end, request.mode)
     return result
 
 
-@app.post("/cut-batch")
+@router.post("/cut-batch")
 async def cut_video_batch(request: BatchClipRequest):
     """
     Endpoint batch: download video SEKALI, potong semua klip.
@@ -93,7 +81,7 @@ async def cut_video_batch(request: BatchClipRequest):
     }
 
 
-@app.post("/cut-gaming-compilation")
+@router.post("/cut-gaming-compilation")
 async def cut_gaming_compilation(request: GamingCompilationRequest):
     """
     Endpoint kompilasi gaming: N klip → 1 video dengan transisi.
@@ -131,7 +119,3 @@ async def cut_gaming_compilation(request: GamingCompilationRequest):
             "total_clips": len(request.clips) if request.clips else 0,
             "error": str(e)
         }
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)

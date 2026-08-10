@@ -14,9 +14,12 @@ OUTPUT_DIR = r"C:\Users\RWID\Downloads\clip"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-COOKIES_PATH = "./youtube_cookies.txt"
-TRANSISI_SOUND = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transisi_sound.mpeg")
-WATERMARK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wm_mk.png")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ASSETS_DIR = os.path.join(PROJECT_ROOT, "assets")
+
+COOKIES_PATH = os.path.join(PROJECT_ROOT, "youtube_cookies.txt")
+TRANSISI_SOUND = os.path.join(ASSETS_DIR, "sounds", "transisi_sound.mpeg")
+WATERMARK_PATH = os.path.join(ASSETS_DIR, "images", "wm_mk.png")
 
 # ─────────────────────────────────────────
 # WHISPER (lazy load — hanya init sekali)

@@ -11,8 +11,8 @@ import subprocess
 import threading
 import cv2
 import numpy as np
-from config import (
-    FFMPEG_EXE, FFPROBE_EXE, TMP_DIR,
+from app.config import (
+    FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, ASSETS_DIR,
     FACECAM_OUTPUT_SIZE, FACE_DETECTION_SAMPLES
 )
 
@@ -27,8 +27,7 @@ _YUNET_URL = (
     "https://github.com/opencv/opencv_zoo/raw/main/"
     "models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 )
-_YUNET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           _YUNET_FILENAME)
+_YUNET_PATH = os.path.join(ASSETS_DIR, "models", _YUNET_FILENAME)
 
 _yunet = None
 
@@ -40,6 +39,7 @@ def _ensure_yunet_model():
               f"({_YUNET_FILENAME})...")
         try:
             import urllib.request
+            os.makedirs(os.path.dirname(_YUNET_PATH), exist_ok=True)
             urllib.request.urlretrieve(_YUNET_URL, _YUNET_PATH)
             size_kb = os.path.getsize(_YUNET_PATH) / 1024
             print(f"[face_detect] Saved {_YUNET_FILENAME} ({size_kb:.0f} KB)")

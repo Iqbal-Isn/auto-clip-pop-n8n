@@ -42,19 +42,29 @@ Telegram Bot → n8n Workflow → FastAPI Backend → ffmpeg/ffprobe
 
 ```
 auto-clip-pop-n8n/
-├── bridge-clipping.py          # 🚀 FastAPI server (entry point)
-├── config.py                   # ⚙️ Konfigurasi, paths, discovery tools
-├── models.py                   # 📋 Pydantic request models
-├── utils.py                    # 🔧 Time conversion, URL helpers
-├── subtitles.py                # 📝 SRT/ASS subtitle + Whisper transcribe
-├── filters.py                  # 🎨 TikTok & gaming video filters
-├── transitions.py              # 🔗 Video concat + compress
-├── face_detector.py            # 👤 YuNet DNN face detection
-├── pipeline.py                 # 🎯 Orkestrasi download → clip → output
-├── clip.json                   # 🔄 n8n workflow definition
-├── face_detection_yunet_2023mar.onnx  # 🧠 YuNet model (auto-download)
-├── transisi_sound.mpeg         # 🔊 Sound effect transisi
-├── wm_mk.png                   # 🖼️ Watermark overlay
+├── run.py                      # 🚀 Entry point (python run.py)
+├── requirements.txt            # 📦 Python dependencies
+├── app/
+│   ├── main.py                 # ⚡ FastAPI app + router mount
+│   ├── config.py               # ⚙️ Konfigurasi, paths, discovery tools
+│   ├── api/
+│   │   └── routes.py           # 🔌 API endpoints (transcript, cut, batch, gaming)
+│   ├── models/
+│   │   └── requests.py         # 📋 Pydantic request models
+│   ├── utils/
+│   │   └── helpers.py          # 🔧 Time conversion, URL helpers
+│   └── services/
+│       ├── subtitles.py        # 📝 SRT/ASS subtitle + Whisper transcribe
+│       ├── filters.py          # 🎨 TikTok & gaming video filters
+│       ├── transitions.py      # 🔗 Video concat + compress
+│       ├── face_detector.py    # 👤 YuNet DNN face detection
+│       └── pipeline.py         # 🎯 Orkestrasi download → clip → output
+├── assets/
+│   ├── images/wm_mk.png        # 🖼️ Watermark overlay
+│   ├── sounds/transisi_sound.mpeg  # 🔊 Sound effect transisi
+│   └── models/                 # 🧠 YuNet ONNX (auto-download saat pertama pakai)
+├── n8n/
+│   └── workflow.json           # 🔄 n8n workflow definition
 └── README.md
 ```
 
@@ -175,20 +185,20 @@ N klip gaming → 1 video kompilasi dengan transisi.
 ### Install Dependencies
 
 ```bash
-pip install fastapi uvicorn youtube-transcript-api faster-whisper pydantic opencv-python numpy
+pip install -r requirements.txt
 ```
 
 ### Menjalankan Server
 
 ```bash
-python bridge-clipping.py
+python run.py
 # Server berjalan di http://0.0.0.0:8000
 # Dokumentasi API: http://localhost:8000/docs
 ```
 
 ### n8n Workflow Setup
 
-1. Import `clip.json` ke n8n
+1. Import `n8n/workflow.json` ke n8n
 2. Konfigurasi credentials:
    - **Telegram API** — untuk bot trigger & send
    - **Anthropic API** — untuk AI Agent (Claude)
@@ -222,7 +232,7 @@ https://youtube.com/watch?v=xxx GAMING5 btmright
 
 ## 🔧 Konfigurasi
 
-Edit `config.py` untuk menyesuaikan:
+Edit `app/config.py` untuk menyesuaikan:
 
 | Konstanta | Default | Deskripsi |
 |-----------|---------|-----------|

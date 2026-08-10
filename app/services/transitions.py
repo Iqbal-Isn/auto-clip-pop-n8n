@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR
+from app.config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR
 
 
 def _get_duration(path: str) -> float:

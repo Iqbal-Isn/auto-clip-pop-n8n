@@ -1,7 +1,7 @@
 """Subtitle generation: SRT, ASS word-by-word karaoke, Whisper transcribe."""
 
 import os
-from config import get_whisper_model
+from app.config import get_whisper_model
 
 
 def create_srt(entries, clip_start_sec, clip_end_sec):

@@ -2,8 +2,8 @@
 
 import os
 import subprocess
-from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, FACECAM_POSITIONS, WATERMARK_PATH, FACECAM_OUTPUT_SIZE
-from face_detector import find_largest_face_in_corners, calculate_face_crop
+from app.config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, FACECAM_POSITIONS, WATERMARK_PATH, FACECAM_OUTPUT_SIZE
+from app.services.face_detector import find_largest_face_in_corners, calculate_face_crop
 
 
 def get_facecam_crop(video_path: str, position: str = "btmleft",

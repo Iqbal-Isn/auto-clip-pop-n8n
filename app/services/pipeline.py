@@ -4,11 +4,11 @@ import os
 import subprocess
 import concurrent.futures
 from datetime import datetime
-from config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, OUTPUT_DIR, TRANSISI_SOUND, yt_dlp_cmd
-from utils import seconds_to_hhmmss, hhmmss_to_seconds
-from subtitles import transcribe_audio, create_ass_from_whisper
-from filters import apply_tiktok_filter, apply_gaming_filter
-from transitions import concat_with_transitions, compress_to_target
+from app.config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, OUTPUT_DIR, TRANSISI_SOUND, yt_dlp_cmd
+from app.utils.helpers import seconds_to_hhmmss, hhmmss_to_seconds
+from app.services.subtitles import transcribe_audio, create_ass_from_whisper
+from app.services.filters import apply_tiktok_filter, apply_gaming_filter
+from app.services.transitions import concat_with_transitions, compress_to_target
 
 
 # ─────────────────────────────────────────
