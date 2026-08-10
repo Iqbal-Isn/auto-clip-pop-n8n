@@ -1,12 +1,15 @@
-pob.mp4
-pob1.mp4
-pobmarcel.mp4
-test.py
-.gitignore
+# Environment
 .env
-.claude
+
+# Python
 __pycache__/
-bridge-clipping-oldv.py
-prompt.txt
-haarcascade_frontalface_default.xml
+
+# Claude Code
+.claude
+
+# Test files
+test.py
+pob*.mp4
+
+# YuNet model (auto-downloaded on first use)
 face_detection_yunet_2023mar.onnx
