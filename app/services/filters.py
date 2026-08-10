@@ -5,6 +5,10 @@ import subprocess
 from app.config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, FACECAM_POSITIONS, WATERMARK_PATH, FACECAM_OUTPUT_SIZE
 from app.services.face_detector import find_largest_face_in_corners, calculate_face_crop
 
+# Cap thread per encode agar 3 worker paralel tidak saling cekik (oversubscription).
+# 3 worker × ENCODE_THREADS ≈ jumlah core logis → utilisasi penuh tanpa thrashing.
+ENCODE_THREADS = str(max(2, (os.cpu_count() or 6) // 3))
+
 
 def get_facecam_crop(video_path: str, position: str = "btmleft",
                      auto_detect: bool = True):
@@ -165,11 +169,18 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
         # Gameplay 4:3: scale ke 1080×810, centered (tidak blur)
         f"[main]scale=1080:810:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop=1080:810,setsar=1[fg];"
-        # Facecam: MINIMAL — light denoise → scale → light sharpen
+        # Facecam: wajah streamer di-crop kecil (~108px) dari sumber 360p lalu
+        # di-upscale → rawan buram. Rantai anti-buram:
+        #   denoise ringan (jangan pertajam noise kompresi)
+        #   → upscale lanczos ke 2× target (headroom detail)
+        #   → unsharp kuat + cas (contrast-adaptive, anti-halo)
+        #   → turunkan ke ukuran display final
         f"[cam_raw]crop={cw}:{ch}:{cx}:{cy},"
+        f"hqdn3d=2:1:3:2,"
+        f"scale={int(FACECAM_SIZE)*2}:-1:flags=lanczos+accurate_rnd,"
+        f"unsharp=5:5:1.2:5:5:0.7,"
+        f"cas=0.6,"
         f"scale={FACECAM_SIZE}:-1:flags=lanczos+accurate_rnd,"
-        f"unsharp=3:3:0.6:3:3:0.4,"
-        f"cas=0.2,"
         f"setsar=1[cam];"
     )
 
@@ -207,8 +218,8 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
     cmd += [
         "-filter_complex", video_filter,
         "-map", "[v]", "-map", "0:a?",
-        "-c:v", "libx264", "-crf", "17", "-preset", "slower", "-pix_fmt", "yuv420p",
-        "-tune", "film",
+        "-c:v", "libx264", "-crf", "20", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-threads", ENCODE_THREADS,
         "-c:a", "aac", "-b:a", "128k",
         tmp_merged, "-y"
     ]
@@ -279,6 +290,7 @@ def apply_tiktok_filter(video_path: str, srt_file: str | None,
                 "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
             )
 
+    # TikTok filter jalan SEQUENTIAL (satu klip per waktu) → biarkan pakai semua core.
     subprocess.run([
         FFMPEG_EXE, "-i", video_path,
         "-filter_complex", video_filter,

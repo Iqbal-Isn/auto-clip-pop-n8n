@@ -46,11 +46,12 @@ def _download_full_video(url: str) -> str:
         return cache_path
 
     print(f"📥 Download FULL video (sekali untuk semua klip)...")
-    # Cascade: 720p60 DASH → 480p DASH → best merged
+    # Cascade: 360p progressive (itag 18, stabil & ringan) → best file tunggal.
+    # DASH HD (298/135) sengaja dihindari — kena HTTP 403 di client ANDROID_VR
+    # dan memaksa download full 1.6GB yang sangat lambat.
     FORMAT_CASCADE = [
-        ("298+140", "720p60 DASH"),
-        ("135+140", "480p30 DASH"),
-        ("best",     "merged"),
+        ("18",   "360p progressive"),
+        ("best", "merged"),
     ]
 
     for fmt, label in FORMAT_CASCADE:
@@ -90,10 +91,10 @@ def _download_full_video(url: str) -> str:
 
 def _download_section(url: str, start_sec: float, end_sec: float, output_path: str):
     """
-    Download section 720p HD (~5-15 detik).
-    1. Format 22 (720p merged) via --download-sections — tercepat
-    2. DASH 720p via direct URL + ffmpeg remote seek
-    3. Fallback full download
+    Download section 360p (itag 18, stabil & cepat, ~5-15 detik).
+    1. Progressive 360p via --download-sections — tercepat
+    2. Progressive 360p via direct URL + ffmpeg remote seek
+    3. Fallback full download + local cut
     """
     start_str = seconds_to_hhmmss(start_sec)
     end_str = seconds_to_hhmmss(end_sec)
@@ -101,12 +102,15 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
 
     print(f"⚡ Download section {start_str} → {end_str}...")
 
-    # ── STEP 1: Format 22 (720p merged) via --download-sections ──
+    # ── STEP 1: Progressive 360p (itag 18) via --download-sections ──
+    # DASH HD (298/136) kena HTTP 403 di client ANDROID_VR → tidak reliable.
+    # Format 18 = file tunggal 360p, stabil & cepat (section-only).
+    # Facecam dipertajam di filter (lihat apply_gaming_filter) untuk kompensasi.
     try:
         subprocess.run(
             yt_dlp_cmd() + [
                 "--download-sections", f"*{start_str}-{end_str}",
-                "-f", "22/best[height<=720]/best",
+                "-f", "18/best[height<=480]/best",
                 "--merge-output-format", "mp4",
                 "-o", output_path,
                 url
@@ -119,18 +123,19 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
             "-of", "csv=p=0", output_path
         ]).decode().strip())
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
-        print(f"✅ 720p merged: {h}p, {size_mb:.1f}MB")
+        print(f"✅ Section: {h}p, {size_mb:.1f}MB")
         return output_path
     except Exception as e:
-        print(f"⚠️ Format 22 tidak tersedia ({str(e)[:60]}), coba DASH...")
+        print(f"⚠️ Section download gagal ({str(e)[:60]}), coba direct URL...")
         if os.path.exists(output_path):
             os.remove(output_path)
 
-    # ── STEP 2: DASH 720p via direct URL + ffmpeg remote seek ──
+    # ── STEP 2: Progressive 360p (itag 18) direct URL + ffmpeg remote seek ──
+    # File tunggal → tidak kena 403 seperti DASH. Remote seek = ambil section saja.
     try:
-        print("🔗 Direct DASH 720p URL...")
+        print("🔗 Direct URL 360p (itag 18) + remote seek...")
         raw = subprocess.check_output(
-            yt_dlp_cmd() + ["-f", "bestvideo[height<=720]+bestaudio", "-g", url],
+            yt_dlp_cmd() + ["-f", "18/best[height<=480]", "-g", url],
             text=True, timeout=60
         ).strip()
         urls = [u for u in raw.split('\n') if u.startswith('http')]
@@ -139,7 +144,6 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
         subprocess.run([
             FFMPEG_EXE,
             "-ss", start_str, "-i", urls[0],
-            "-ss", start_str, "-i", urls[1],
             "-t", str(duration),
             "-c:v", "copy", "-c:a", "copy",
             "-avoid_negative_ts", "make_zero",
@@ -153,15 +157,15 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
             "-of", "csv=p=0", output_path
         ]).decode().strip())
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
-        print(f"✅ DASH 720p: {h}p, {size_mb:.1f}MB")
+        print(f"✅ Direct 360p: {h}p, {size_mb:.1f}MB")
         return output_path
 
     except Exception as e:
-        print(f"⚠️ DASH gagal ({str(e)[:60]}), fallback full download...")
+        print(f"⚠️ Direct URL gagal ({str(e)[:60]}), fallback full download...")
         if os.path.exists(output_path):
             os.remove(output_path)
 
-    # ── STEP 3: Full download + local cut ──
+    # ── STEP 3: Full download + local cut (last resort) ──
     full_video = _download_full_video(url)
     _cut_section_locally(full_video, start_sec, end_sec, output_path)
     return output_path
