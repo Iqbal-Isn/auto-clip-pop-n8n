@@ -102,6 +102,18 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
 
     print(f"⚡ Download section {start_str} → {end_str}...")
 
+    # ── STEP 0: HD byte-range fMP4 (720p/1080p, ~beberapa detik) ──
+    # Ganti format progresif 22 yang sudah dihapus YouTube. Ambil hanya window
+    # byte fragmen DASH → HD asli tanpa full-download. Fallback ke 360p jika gagal.
+    try:
+        from app.services.hd_downloader import download_section_hd
+        download_section_hd(url, start_sec, end_sec, output_path)
+        return output_path
+    except Exception as e:
+        print(f"⚠️ HD byte-range gagal ({str(e)[:70]}), fallback 360p...")
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
     # ── STEP 1: Progressive 360p (itag 18) via --download-sections ──
     # DASH HD (298/136) kena HTTP 403 di client ANDROID_VR → tidak reliable.
     # Format 18 = file tunggal 360p, stabil & cepat (section-only).
