@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from app.models.requests import ClipRequest, BatchClipRequest, GamingCompilationRequest
-from app.utils.helpers import seconds_to_hhmmss, extract_video_id
+from app.utils.helpers import seconds_to_hhmmss, extract_video_id, parse_time_range
 from app.services.pipeline import cut_video_task, _cut_video_impl, process_gaming_compilation
 
 router = APIRouter()
@@ -15,18 +15,30 @@ router = APIRouter()
 # ─────────────────────────────────────────
 
 @router.get("/transcript")
-async def get_transcript(url: str):
+async def get_transcript(url: str, range: str = ""):
+    """
+    Ambil transkrip YouTube.
+    Opsional filter range: 'HH:MM:SS-HH:MM:SS' — hanya snippet yang overlap
+    rentang yang dikembalikan. Timestamp output tetap ABSOLUTE (bukan relatif)
+    agar nilai start/end langsung bisa dipakai endpoint /cut.
+    """
     try:
         video_id = extract_video_id(url)
         if not video_id:
             return {"error": "Video ID tidak ditemukan"}
+
+        start_sec, end_sec = parse_time_range(range)
 
         ytt_api = YouTubeTranscriptApi()
         fetched = ytt_api.fetch(video_id, languages=['id', 'en'])
 
         formatted_lines = []
         for snippet in fetched:
-            timestamp = seconds_to_hhmmss(snippet.start)
+            es = snippet.start
+            ee = snippet.start + snippet.duration
+            if start_sec is not None and (ee < start_sec or es > end_sec):
+                continue
+            timestamp = seconds_to_hhmmss(es)
             formatted_lines.append(f"[{timestamp}] {snippet.text}")
 
         return {"transcript": "\n".join(formatted_lines)}

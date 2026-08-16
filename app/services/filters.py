@@ -116,7 +116,7 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
     Gaming layout:
     - Background blur 1080×1920 (dari gameplay yang sama)
     - Gameplay 4:3 (1080×810) centered, tidak blur
-    - Watermark 150px di tengah gameplay box (jika wm_mk.png tersedia)
+    - Watermark 150px di tengah gameplay box (jika watermark.png tersedia)
     - Facecam overlay 360px di pojok gameplay box (nempel tepi, di atas watermark)
     - Subtitle dibakar di atas komposit (jika ada)
 
@@ -274,11 +274,18 @@ def apply_tiktok_filter(video_path: str, srt_file: str | None,
             )
     else:
         print(f"[tiktok] Mode NORMAL ({prefix}) - blur background + foreground + subtitle...")
+        # Foreground anti-buram: denoise ringan → scale lanczos → unsharp + cas.
+        # Kompensasi upscale sumber (720p/360p) ke 1080×1080 — sama seperti gaming.
         if srt_file:
             video_filter = (
                 "[0:v]split[orig_raw][bg];"
                 "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=spline,crop=1080:1920,boxblur=15:15[blurred];"
-                f"[orig_raw]scale=1080:1080:force_original_aspect_ratio=increase:flags=spline,crop=1080:1080[scaled];"
+                "[orig_raw]hqdn3d=2:1:3:2,"
+                "scale=1080:1080:force_original_aspect_ratio=increase:flags=lanczos+accurate_rnd,"
+                "crop=1080:1080,"
+                "unsharp=5:5:1.0:5:5:0.5,"
+                "cas=0.3,"
+                "setsar=1[scaled];"
                 f"[scaled]{sub_chain}[fg];"
                 "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
             )
@@ -286,7 +293,12 @@ def apply_tiktok_filter(video_path: str, srt_file: str | None,
             video_filter = (
                 "[0:v]split[orig][bg];"
                 "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=spline,crop=1080:1920,boxblur=15:15[blurred];"
-                "[orig]scale=1080:1080:force_original_aspect_ratio=increase:flags=spline,crop=1080:1080[fg];"
+                "[orig]hqdn3d=2:1:3:2,"
+                "scale=1080:1080:force_original_aspect_ratio=increase:flags=lanczos+accurate_rnd,"
+                "crop=1080:1080,"
+                "unsharp=5:5:1.0:5:5:0.5,"
+                "cas=0.3,"
+                "setsar=1[fg];"
                 "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
             )
 

@@ -89,9 +89,23 @@ def _download_full_video(url: str) -> str:
     raise RuntimeError("Gagal download full video — semua format gagal")
 
 
+def _probe_resolution(path: str) -> tuple[int, int]:
+    """Probe resolusi video (width, height) via ffprobe."""
+    out = subprocess.check_output([
+        FFPROBE_EXE, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0",
+        path
+    ]).decode().strip()
+    w, h = out.split(",")
+    return int(w), int(h)
+
+
 def _download_section(url: str, start_sec: float, end_sec: float, output_path: str):
     """
-    Download section 360p (itag 18, stabil & cepat, ~5-15 detik).
+    Download section — prioritas HD 720p/1080p (byte-range fMP4), fallback 360p.
+    0. HD byte-range (720p/1080p, via sidx fMP4) — guard: harus >= 720p
     1. Progressive 360p via --download-sections — tercepat
     2. Progressive 360p via direct URL + ffmpeg remote seek
     3. Fallback full download + local cut
@@ -105,12 +119,16 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
     # ── STEP 0: HD byte-range fMP4 (720p/1080p, ~beberapa detik) ──
     # Ganti format progresif 22 yang sudah dihapus YouTube. Ambil hanya window
     # byte fragmen DASH → HD asli tanpa full-download. Fallback ke 360p jika gagal.
+    # GUARD RESOLUSI: hasil wajib >= 720p — jika lebih rendah, anggap gagal & lanjut.
     try:
         from app.services.hd_downloader import download_section_hd
         download_section_hd(url, start_sec, end_sec, output_path)
+        w, h = _probe_resolution(output_path)
+        if h < 720:
+            raise RuntimeError(f"HD <720p ({w}x{h})")
         return output_path
     except Exception as e:
-        print(f"⚠️ HD byte-range gagal ({str(e)[:70]}), fallback 360p...")
+        print(f"⚠️ HD byte-range gagal / tidak 720p ({str(e)[:70]}), lanjut fallback...")
         if os.path.exists(output_path):
             os.remove(output_path)
 
@@ -128,13 +146,11 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
                 url
             ], check=True, timeout=120
         )
-        h = int(subprocess.check_output([
-            FFPROBE_EXE, "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=height",
-            "-of", "csv=p=0", output_path
-        ]).decode().strip())
+        w, h = _probe_resolution(output_path)
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        if h < 720:
+            print(f"🟡 Resolusi {w}x{h} (<720p — HD gagal): hasil mungkin agak buram, "
+                  f"dikompensasi sharpen di filter.")
         print(f"✅ Section: {h}p, {size_mb:.1f}MB")
         return output_path
     except Exception as e:
@@ -162,13 +178,10 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
             output_path, "-y"
         ], check=True, timeout=120)
 
-        h = int(subprocess.check_output([
-            FFPROBE_EXE, "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=height",
-            "-of", "csv=p=0", output_path
-        ]).decode().strip())
+        w, h = _probe_resolution(output_path)
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        if h < 720:
+            print(f"🟡 Resolusi {w}x{h} (<720p — HD gagal): hasil mungkin agak buram.")
         print(f"✅ Direct 360p: {h}p, {size_mb:.1f}MB")
         return output_path
 

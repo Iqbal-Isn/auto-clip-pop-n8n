@@ -19,7 +19,7 @@ ASSETS_DIR = os.path.join(PROJECT_ROOT, "assets")
 
 COOKIES_PATH = os.path.join(PROJECT_ROOT, "youtube_cookies.txt")
 TRANSISI_SOUND = os.path.join(ASSETS_DIR, "sounds", "transisi_sound.mpeg")
-WATERMARK_PATH = os.path.join(ASSETS_DIR, "images", "wm_mk.png")
+WATERMARK_PATH = os.path.join(ASSETS_DIR, "images", "watermark.png")
 
 # ─────────────────────────────────────────
 # WHISPER (lazy load — hanya init sekali)

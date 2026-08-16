@@ -344,9 +344,9 @@
       "parameters": {
         "model": {
           "__rl": true,
-          "value": "claude-sonnet-4-6",
+          "value": "claude-sonnet-5",
           "mode": "list",
-          "cachedResultName": "claude-sonnet-4-6"
+          "cachedResultName": "claude-sonnet-5"
         },
         "options": {}
       },
@@ -435,6 +435,10 @@
             {
               "name": "url",
               "value": "={{ $('Telegram Trigger').item.json.message.link_preview_options.url }}"
+            },
+            {
+              "name": "range",
+              "value": "={{ $('Telegram Trigger').item.json.message.text.trim().split(' ').find(p => p.includes('-')) ?? '' }}"
             }
           ]
         },
@@ -452,7 +456,7 @@
     {
       "parameters": {
         "promptType": "define",
-        "text": "=Kamu adalah AI Gaming Highlight Editor profesional yang bertugas membuat video highlight YouTube Shorts, TikTok, dan Instagram Reels.\n\n## INPUT\n\nKamu akan menerima transcript gameplay.\n\nFormat transcript:\n\n[HH:MM:SS] isi percakapan\n\nContoh:\n\n[00:10:21] anjir anjir...\n[00:10:24] mati dia...\n[00:10:28] WOOOOOOOOO!!\n\nTranscript:\n\n{{ $json.transcript }}\n\n==================================================\nTUJUAN\n==================================================\n\nCari 5 KLIMAKS PALING VIRAL dari seluruh transcript.\n\nPENTING:\n\nYang dicari BUKAN seluruh kejadian.\n\nYang dicari adalah bagian PALING MENARIK dari suatu kejadian.\n\nOutput ini akan dipakai membuat video highlight kompilasi.\n\nKarena itu setiap klip harus langsung menarik dalam 1-3 detik pertama.\n\n==================================================\nDEFINISI KLIMAKS\n==================================================\n\nKlimaks adalah titik dengan emosi tertinggi.\n\nMisalnya:\n\n- clutch\n- ace\n- wipe squad\n- triple kill\n- savage\n- comeback\n- streamer berteriak\n- semua orang tertawa\n- rage\n- trash talk\n- fail lucu\n- glitch\n- plot twist\n- panic\n- reaction\n\nJika sebuah kejadian berlangsung lama,\nambil HANYA bagian paling serunya.\n\nJANGAN mengambil build-up yang panjang.\n\n==================================================\nCARA MEMILIH START\n==================================================\n\nStart HARUS sedekat mungkin dengan klimaks.\n\nSALAH\n\nMusuh mulai datang...\nMasih jalan...\nMasih ngobrol...\nBaru kill.\n\nBENAR\n\n2-5 detik sebelum kill terjadi.\n\nJika hook muncul lebih awal,\nmulai dari hook.\n\n==================================================\nCARA MEMILIH END\n==================================================\n\nEnd tepat setelah:\n\n- kill selesai\n- reaction selesai\n- tawa selesai\n- scream selesai\n- punchline selesai\n\nJangan terlalu panjang.\n\n==================================================\nPRIORITAS PENILAIAN\n==================================================\n\n1. Hook (40%)\n\nApakah 3 detik pertama membuat orang berhenti scroll?\n\nContoh:\n\nANJIR!!\n\nNO WAY!!\n\nWOOOO!!\n\nHAHAHAHA!!\n\nSemakin cepat hook muncul,\nsemakin tinggi nilainya.\n\n--------------------------------------------------\n\n2. Intensitas (25%)\n\nSemakin tinggi emosi semakin bagus.\n\n--------------------------------------------------\n\n3. Viral Potential (20%)\n\nApakah orang kemungkinan akan share atau replay?\n\n--------------------------------------------------\n\n4. Kelengkapan (10%)\n\nTetap bisa dipahami tanpa konteks panjang.\n\n--------------------------------------------------\n\n5. Variasi (5%)\n\nPilih tipe momen yang berbeda.\n\n==================================================\nKATEGORI\n==================================================\n\nPrioritas:\n\nCLUTCH\n\nEPIC KILL\n\nACE\n\nCOMEBACK\n\nKOCAK\n\nFAIL\n\nRAGE\n\nTRASH TALK\n\nBIG BRAIN\n\nPANIC\n\nINTERAKSI\n\n==================================================\nATURAN WAJIB\n==================================================\n\nGunakan HANYA timestamp yang ada di transcript.\n\nJANGAN membuat timestamp baru.\n\nStart dan End HARUS sama persis dengan timestamp transcript.\n\nDurasi ideal 10-20 detik.\n\nMaksimum 30 detik.\n\nJika tidak ada timestamp yang sesuai,\npilih timestamp terdekat yang ADA di transcript.\n\nJangan memilih dua klip yang overlap.\n\nUrutkan hasil berdasarkan timestamp.\n\nSetiap klip harus memiliki kategori yang jelas.\n\nAlasan WAJIB mengutip kalimat dari transcript.\n\nCaption WAJIB diawali hook yang menarik.\n\n==================================================\nOUTPUT\n==================================================\n\nOutput HARUS berupa JSON ARRAY VALID.\n\nJANGAN menggunakan markdown.\n\nJANGAN menggunakan ```json.\n\nJANGAN memberikan penjelasan.\n\nJANGAN memberikan pembukaan.\n\nJANGAN memberikan penutup.\n\nOutput dimulai langsung dari karakter [\n\n[\n  {\n    \"nomor\":1,\n    \"start\":\"00:00:00\",\n    \"end\":\"00:00:00\",\n    \"overall_score\":96,\n    \"hook_score\":98,\n    \"emotion_score\":94,\n    \"viral_score\":95,\n    \"kategori\":\"CLUTCH\",\n    \"hook\":\"ANJIR GUA MENANG!\",\n    \"alasan\":\"Kutipan langsung dari transcript.\",\n    \"caption\":\"NO WAY!! 🤯 Clutch paling gila hari ini! #gaming #shorts #fyp #mlbb #indonesia\"\n  }\n]",
+        "text": "=Kamu adalah AI Comedy Highlight Editor profesional yang bertugas mencari momen PALING KOCAK dari gameplay untuk TikTok, YouTube Shorts, dan Instagram Reels.\n\n## INPUT\n\nKamu akan menerima transcript gameplay.\n\nFormat transcript:\n[HH:MM:SS] isi percakapan\n\nTranscript:\n{{ $json.transcript }}\n\n==================================================\nTUJUAN\n==================================================\n\nCari 5 momen PALING KOCAK dari transcript.\n\nOutput ini akan dipakai membuat video highlight kompilasi komedi gaming.\n\nSetiap klip harus langsung bikin orang NGAKAK atau SENYUM dalam 1-3 detik pertama.\n\n==================================================\nDEFINISI MOMEN KOCAK\n==================================================\n\nPrioritas tertinggi ke terendah:\n\n1. REAKSI LEBAY — teriakan tidak perlu, kepanikan berlebihan, shock padahal remeh\n2. REAKSI HOROR — jumpscare, kaget berlebihan, teriakan histeris, lari panik, takut sendiri sama hal remeh\n3. REAKSI KOCAK — salah tingkah, ketawa spontan, respons absurd, salah ngomong, gagal melakukan sesuatu dengan cara konyol, blunder tidak terduga, situasi absurd yang bikin ngakak, salah paham, tingkah streamer yang aneh/konyol, atau reaksi lucu terhadap kejadian sederhana.\n4. ROASTING/BULLY — ledek teman, trash talk lucu, sindiran absurd\n\n\n\nJANGAN pilih momen serius, kekocakan murni, atau momen yang butuh konteks panjang untuk lucu.\n\n==================================================\nCARA MEMILIH START\n==================================================\n\nStart tepat di DETIK PERTAMA yang sudah lucu.\n\nSALAH: mulai dari setup panjang sebelum lucunya.\nBENAR: langsung mulai dari kata/reaksi lucu pertama.\n\nJika ada dialog lucu, start dari kata lucu pertama.\nJika ada reaksi, start 1-2 detik sebelum reaksi muncul.\n\n==================================================\nCARA MEMILIH END\n==================================================\n\nEnd tepat setelah:\n- tawa selesai\n- punchline selesai\n- reaksi kocak selesai\n- momen absurd berakhir\n\nJangan extend terlalu lama setelah lucunya selesai.\n\n==================================================\nATURAN WAJIB\n==================================================\n\nGunakan HANYA timestamp yang ada di transcript.\nJANGAN membuat timestamp baru.\nStart dan End HARUS sama persis dengan timestamp transcript.\nDurasi ideal 10-20 detik. Maksimum 20 detik.\nJangan memilih dua klip yang overlap.\nUrutkan hasil berdasarkan timestamp (kronologis).\nAlasan WAJIB mengutip kalimat lucu langsung dari transcript.\nCaption WAJIB diawali hook komedi yang memancing tawa.\nJANGAN menggunakan markdown atau ```json.\nJANGAN memberikan penjelasan, pembukaan, atau penutup.\nOutput dimulai langsung dari karakter [\n\n==================================================\nOUTPUT\n==================================================\n\n[\n  {\n    \"nomor\": 1,\n    \"start\": \"00:00:00\",\n    \"end\": \"00:00:00\",\n    \"overall_score\": 96,\n    \"hook_score\": 98,\n    \"emotion_score\": 94,\n    \"viral_score\": 95,\n    \"kategori\": \"REAKSI LEBAY/HOROR/KOCAK/ROASTING/BULLY\",\n    \"hook\": \"HAHAHA ANJIR!!\",\n    \"alasan\": \"Kutipan langsung dari transcript yang menjelaskan kenapa ini lucu.\",\n    \"caption\": \"BRO KENAPA?? 😂 Fail paling konyol yang pernah ada! #gaming #fail #kocak #shorts #fyp\"\n  }\n]",
         "options": {}
       },
       "name": "AI Agent GAMING5",
@@ -466,7 +470,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Parse output AI + extract facecam position + langsung aggregate ke 1 item\nconst raw = $('AI Agent GAMING5').item.json.output;\n\nconst safeTruncate = (str, maxLen) => {\n  if (!str) return '';\n  const chars = Array.from(str);\n  return chars.length > maxLen ? chars.slice(0, maxLen).join('') + '...' : str;\n};\n\nlet moments;\ntry {\n  // Cari JSON array TERAKHIR (AI selalu taruh output asli di akhir)\nconst match = raw.match(/\\[\\s*\\{[\\s\\S]*?\\}\\s*\\]/);\n  if (!match) throw new Error('Format JSON tidak ditemukan dalam output AI');\n  moments = JSON.parse(match[0]);\n} catch (err) {\n  throw new Error('AI gagal menghasilkan output valid: ' + err.message);\n}\n\nconst originalText = $('Telegram Trigger').item.json.message.text.trim();\nconst parts = originalText.split(' ');\nconst yt_url = parts[0];\n\nconst textUpper = originalText.toUpperCase();\nlet facecamPosition = 'btmleft';\nif (textUpper.includes('TOPRIGHT')) facecamPosition = 'topright';\nelse if (textUpper.includes('TOPLEFT')) facecamPosition = 'topleft';\nelse if (textUpper.includes('BTMRIGHT')) facecamPosition = 'btmright';\nelse if (textUpper.includes('BTMLEFT')) facecamPosition = 'btmleft';\n\nconst chatId = $('Telegram Trigger').item.json.message.chat.id;\n\n// Build notifikasi\nlet notifyMsg = '\\u{1F3AE} *5 Momen Gaming Ditemukan!*\\n';\nnotifyMsg += '\\u{1F4CD} Facecam: ' + facecamPosition.toUpperCase() + '\\n\\n';\n\nmoments.forEach((m, i) => {\n  notifyMsg += '*' + (i + 1) + '.* \\u23F1 ' + m.start + ' - ' + m.end + ' | ' + m.tipe + '\\n';\n  notifyMsg += '\\u{1F4DD} ' + safeTruncate(m.alasan, 100) + '\\n';\n  notifyMsg += '\\u{1F3F7}\\uFE0F ' + safeTruncate(m.caption, 60) + '\\n\\n';\n});\n\nnotifyMsg += '\\u23F3 Memproses kompilasi *' + moments.length + ' klip*...';\nnotifyMsg += '\\n\\u{1F4F9} Video final akan dikirim via Google Drive.';\n\n// ==========================================\n// RETURN: 1 item dengan clips array + notifyText\n// ==========================================\nreturn [{\n  json: {\n    url: yt_url,\n    clips: moments.map(m => ({ start: m.start, end: m.end })),\n    facecam_position: facecamPosition,\n    chatId: chatId,\n    notifyText: notifyMsg\n  }\n}];"
+        "jsCode": "// Parse output AI + extract facecam position + langsung aggregate ke 1 item\n  const raw = $('AI Agent GAMING5').item.json.output;\n\n  const safeTruncate = (str, maxLen) => {\n    if (!str) return '';\n    const chars = Array.from(str);\n    return chars.length > maxLen ? chars.slice(0, maxLen).join('') + '...' : str;\n  };\n\n  // Sanitasi MINIMAL — hanya hal yang 100% aman\n  function sanitizeJSON(text) {\n    // 1. Hapus markdown code fences\n    text = text.replace(/```json\\s*/gi, '').replace(/```\\s*/g, '');\n\n    // 2. Hapus trailing comma sebelum ] atau }\n    text = text.replace(/,(\\s*[\\]}])/g, '$1');\n\n    return text;\n  }\n\n  // Cari JSON array dengan regex GREEDY\n  const match = raw.match(/\\[[\\s\\S]*\\]/);\n  if (!match) throw new Error('Format JSON tidak ditemukan dalam output AI');\n\n  let jsonText = match[0];\n  let moments;\n\n  // Coba 1: parse langsung (tanpa sanitasi)\n  try {\n    moments = JSON.parse(jsonText);\n  } catch (err1) {\n    // Coba 2: sanitasi lalu parse\n    try {\n      jsonText = sanitizeJSON(jsonText);\n      moments = JSON.parse(jsonText);\n    } catch (err2) {\n      // Coba 3: bersihin semua karakter non-printable + coba lagi\n      try {\n        jsonText = jsonText.replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F]/g, ' ');\n        moments = JSON.parse(jsonText);\n      } catch (err3) {\n        const preview = raw ? raw.substring(0, 500) : '(empty)';\n        throw new Error('AI gagal menghasilkan output valid: ' + err3.message + ' | Raw: ' + preview);\n      }\n    }\n  }\n\n  if (!Array.isArray(moments) || moments.length === 0) {\n    throw new Error('Output bukan array atau array kosong');\n  }\n\n  const originalText = $('Telegram Trigger').item.json.message.text.trim();\n  const parts = originalText.split(' ');\n  const yt_url = parts[0];\n\n  const textUpper = originalText.toUpperCase();\n  let facecamPosition = 'btmleft';\n  if (textUpper.includes('TOPRIGHT')) facecamPosition = 'topright';\n  else if (textUpper.includes('TOPLEFT')) facecamPosition = 'topleft';\n  else if (textUpper.includes('BTMRIGHT')) facecamPosition = 'btmright';\n  else if (textUpper.includes('BTMLEFT')) facecamPosition = 'btmleft';\n\n  const chatId = $('Telegram Trigger').item.json.message.chat.id;\n\n  // Build notifikasi\n  let notifyMsg = '\\u{1F3AE} *5 Momen Gaming Ditemukan!*\\n';\n  notifyMsg += '\\u{1F4CD} Facecam: ' + facecamPosition.toUpperCase() + '\\n\\n';\n\n  moments.forEach((m, i) => {\n    const tipe = m.tipe || m.kategori || 'GAMING';\n    notifyMsg += '*' + (i + 1) + '.* \\u23F1 ' + m.start + ' - ' + m.end + ' | ' + tipe + '\\n';\n    notifyMsg += '\\u{1F4DD} ' + safeTruncate(m.alasan, 100) + '\\n';\n    notifyMsg += '\\u{1F3F7}\\uFE0F ' + safeTruncate(m.caption, 60) + '\\n\\n';\n  });\n\n  notifyMsg += '\\u23F3 Memproses kompilasi *' + moments.length + ' klip*...';\n  notifyMsg += '\\n\\u{1F4F9} Video final akan dikirim via Google Drive.';\n\n  return [{\n    json: {\n      url: yt_url,\n      clips: moments.map(m => ({ start: m.start, end: m.end })),\n      facecam_position: facecamPosition,\n      chatId: chatId,\n      notifyText: notifyMsg\n    }\n  }];"
       },
       "name": "Parse GAMING5",
       "type": "n8n-nodes-base.code",
@@ -546,21 +550,6 @@
         6544
       ],
       "id": "9cc326fa-1916-43b3-8e53-e84b8a202760"
-    },
-    {
-      "parameters": {
-        "name": "=Gaming_Compilation_{{ $now.format('yyyyMMdd_HHmmss') }}.mp4",
-        "parents": "={{ $json.root }}",
-        "options": {}
-      },
-      "name": "Google Drive Upload",
-      "type": "n8n-nodes-base.googleDrive",
-      "typeVersion": 1,
-      "position": [
-        10592,
-        6256
-      ],
-      "id": "c52bffd7-62b7-414a-8128-43b8f72a8088"
     },
     {
       "parameters": {
@@ -885,14 +874,15 @@
         ]
       ]
     },
-    "Google Drive Upload": {
-      "main": [
-        []
-      ]
-    },
     "Google Gemini Chat Model1": {
       "ai_languageModel": [
-        []
+        [
+          {
+            "node": "AI Agent GAMING5",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
       ]
     },
     "Send text GAMING5": {
@@ -913,11 +903,6 @@
             "node": "AI Agent",
             "type": "ai_languageModel",
             "index": 0
-          },
-          {
-            "node": "AI Agent GAMING5",
-            "type": "ai_languageModel",
-            "index": 0
           }
         ]
       ]
@@ -928,7 +913,7 @@
     "executionOrder": "v1",
     "binaryMode": "separate"
   },
-  "versionId": "63585492-7880-40aa-b47f-751f09880018",
+  "versionId": "eb1983e1-a616-4bc4-b32c-2abc231056e1",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "ae3586e867ff7d88c81b814417f0a8e5523aefb6b98e0958c4f70029adc39945"

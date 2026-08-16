@@ -26,3 +26,21 @@ def hhmmss_to_seconds(t: str):
     elif len(parts) == 2:
         return int(parts[0]) * 60 + int(parts[1])
     return int(parts[0])
+
+
+def parse_time_range(range_str: str):
+    """
+    Parse range 'HH:MM:SS-HH:MM:SS' → (start_sec, end_sec).
+    Return (None, None) jika range kosong atau format tidak valid.
+    """
+    if not range_str or "-" not in range_str:
+        return None, None
+    try:
+        start_s, end_s = range_str.split("-", 1)
+        start = hhmmss_to_seconds(start_s.strip())
+        end = hhmmss_to_seconds(end_s.strip())
+        if end <= start:
+            return None, None
+        return start, end
+    except (ValueError, IndexError):
+        return None, None

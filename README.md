@@ -60,7 +60,7 @@ auto-clip-pop-n8n/
 │       ├── face_detector.py    # 👤 YuNet DNN face detection
 │       └── pipeline.py         # 🎯 Orkestrasi download → clip → output
 ├── assets/
-│   ├── images/wm_mk.png        # 🖼️ Watermark overlay
+│   ├── images/watermark.png    # 🖼️ Watermark overlay
 │   ├── sounds/transisi_sound.mpeg  # 🔊 Sound effect transisi
 │   └── models/                 # 🧠 YuNet ONNX (auto-download saat pertama pakai)
 ├── n8n/
