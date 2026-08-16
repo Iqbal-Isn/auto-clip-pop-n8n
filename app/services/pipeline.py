@@ -132,31 +132,41 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
         if os.path.exists(output_path):
             os.remove(output_path)
 
-    # ── STEP 1: Progressive 360p (itag 18) via --download-sections ──
-    # DASH HD (298/136) kena HTTP 403 di client ANDROID_VR → tidak reliable.
-    # Format 18 = file tunggal 360p, stabil & cepat (section-only).
-    # Facecam dipertajam di filter (lihat apply_gaming_filter) untuk kompensasi.
-    try:
-        subprocess.run(
-            yt_dlp_cmd() + [
-                "--download-sections", f"*{start_str}-{end_str}",
-                "-f", "18/best[height<=480]/best",
-                "--merge-output-format", "mp4",
-                "-o", output_path,
-                url
-            ], check=True, timeout=120
-        )
-        w, h = _probe_resolution(output_path)
-        size_mb = os.path.getsize(output_path) / (1024 * 1024)
-        if h < 720:
-            print(f"🟡 Resolusi {w}x{h} (<720p — HD gagal): hasil mungkin agak buram, "
-                  f"dikompensasi sharpen di filter.")
-        print(f"✅ Section: {h}p, {size_mb:.1f}MB")
-        return output_path
-    except Exception as e:
-        print(f"⚠️ Section download gagal ({str(e)[:60]}), coba direct URL...")
-        if os.path.exists(output_path):
-            os.remove(output_path)
+    # ── STEP 1: Section via --download-sections — coba 720p dulu, lalu 360p ──
+    # STEP 0 (HD byte-range) sudah menyelesaikan mayoritas kasus; step ini adalah
+    # jalan kedua untuk video members-only / kasus HD yang gagal. Prioritas:
+    #   1. 720p DASH merged (bv*≤720 + ba) — via default client + cookies (bukan
+    #      android_vr) umumnya tidak kena HTTP 403.
+    #   2. 360p progressive (itag 18) — stabil & cepat, fallback terakhir.
+    section_cascade = [
+        ("bv*[height<=720]+ba/b[height<=720]", "720p DASH merged"),
+        ("18/best[height<=480]/best", "360p progressive"),
+    ]
+    for fmt, label in section_cascade:
+        try:
+            subprocess.run(
+                yt_dlp_cmd() + [
+                    "--download-sections", f"*{start_str}-{end_str}",
+                    "-f", fmt,
+                    "--merge-output-format", "mp4",
+                    "-o", output_path,
+                    url
+                ], check=True, timeout=180
+            )
+            w, h = _probe_resolution(output_path)
+            size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            if h < 720:
+                print(f"🟡 Resolusi {w}x{h} (<720p — HD gagal, {label}): hasil mungkin agak buram, "
+                      f"dikompensasi sharpen di filter.")
+            else:
+                print(f"✅ Section ({label}): {h}p, {size_mb:.1f}MB")
+            return output_path
+        except Exception as e:
+            print(f"⚠️ Section {label} gagal ({str(e)[:60]}), lanjut...")
+            if os.path.exists(output_path):
+                os.remove(output_path)
+
+    print("⚠️ Semua format section gagal, coba direct URL...")
 
     # ── STEP 2: Progressive 360p (itag 18) direct URL + ffmpeg remote seek ──
     # File tunggal → tidak kena 403 seperti DASH. Remote seek = ambil section saja.
@@ -311,6 +321,17 @@ def _cut_video_impl(url: str, segments: list[dict], mode: str = "normal") -> lis
     if not segments:
         return []
 
+    # Fail-fast: pastikan sesi cookies member masih valid sebelum kerja berat.
+    try:
+        from app.services.hd_downloader import check_session_ok
+        check_session_ok(url)
+    except RuntimeError as e:
+        print(f"🍪 {e}")
+        return [{
+            "status": "error", "file": None, "size_mb": 0,
+            "mode": mode, "error": str(e)
+        }]
+
     print(f"\n{'='*50}")
     print(f"🎬 BATCH PROCESSING: {len(segments)} klip")
     print(f"📐 Mode: {mode.upper()}")
@@ -367,6 +388,14 @@ def process_gaming_compilation(url: str, clips: list[dict],
     """
     n = len(clips)
     print(f"\n{'='*50}")
+
+    # Fail-fast: pastikan sesi cookies member masih valid sebelum kerja berat.
+    try:
+        from app.services.hd_downloader import check_session_ok
+        check_session_ok(url)
+    except RuntimeError as e:
+        print(f"🍪 {e}")
+        raise
     print(f"🎮 GAMING COMPILATION: {n} klip → 1 video")
     print(f"📐 Facecam position: {facecam_position.upper()}")
     for i, seg in enumerate(clips):

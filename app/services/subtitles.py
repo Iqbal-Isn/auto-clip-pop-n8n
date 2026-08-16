@@ -1,7 +1,11 @@
 """Subtitle generation: SRT, ASS word-by-word karaoke, Whisper transcribe."""
 
 import os
-from app.config import get_whisper_model
+import re
+import glob
+import subprocess
+from app.config import get_whisper_model, yt_dlp_cmd, TMP_DIR
+from app.utils.helpers import seconds_to_hhmmss
 
 
 def create_srt(entries, clip_start_sec, clip_end_sec):
@@ -190,3 +194,105 @@ def create_ass_from_whisper(words, width=1080, height=1080, margin_v=30):
             )
 
     return header + "\n".join(dialogues)
+
+
+# ─────────────────────────────────────────
+# TRANSCRIPT FALLBACK — yt-dlp auto-subs (members-only support)
+# ─────────────────────────────────────────
+
+def _clean_caption_text(text: str) -> str:
+    """Bersihkan tag & entity dari teks caption (auto-generated VTT/SRT)."""
+    text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&")
+    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_caption_file(path: str) -> list[tuple[float, str]]:
+    """Parse file .vtt/.srt → list (start_sec, text) terurut."""
+    entries: list[tuple[float, str]] = []
+    cur_start = None
+    cur_text: list[str] = []
+    is_vtt = path.lower().endswith(".vtt")
+    ts_re = (re.compile(r"^(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->")
+             if is_vtt else
+             re.compile(r"^(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->"))
+
+    def flush():
+        nonlocal cur_start, cur_text
+        if cur_start is not None and cur_text:
+            entries.append((cur_start, " ".join(cur_text)))
+        cur_start = None
+        cur_text = []
+
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                flush()
+                continue
+            m = ts_re.match(line)
+            if m:
+                flush()
+                h, mi, s, ms = m.groups()
+                cur_start = (int(h) * 3600 + int(mi) * 60
+                             + int(s) + int(ms) / 1000)
+            elif ("-->" not in line and not line.isdigit()
+                  and not line.startswith("WEBVTT")
+                  and not line.startswith("Kind:")
+                  and not line.startswith("Language:")):
+                clean = _clean_caption_text(line)
+                if clean:
+                    cur_text.append(clean)
+    flush()
+    entries.sort(key=lambda e: e[0])
+    return entries
+
+
+def fetch_transcript_via_ytdlp(video_id: str,
+                               start_sec=None, end_sec=None) -> str | None:
+    """
+    Fallback transkrip via yt-dlp --write-auto-subs.
+    Mendukung konten members-only (dengan cookies di youtube_cookies.txt).
+    Return teks '[HH:MM:SS] ...' ter-filter range, atau None jika gagal.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    subdir = os.path.join(TMP_DIR, f"yt_subs_{video_id}")
+    os.makedirs(subdir, exist_ok=True)
+
+    try:
+        subprocess.run(
+            yt_dlp_cmd() + [
+                "--skip-download",
+                "--write-auto-subs", "--write-subs",
+                "--sub-langs", "id.*,en.*,original",
+                "--sub-format", "vtt/srt",
+                "--no-playlist",
+                "-o", os.path.join(subdir, "sub.%(ext)s"),
+                url,
+            ], check=True, timeout=120, capture_output=True
+        )
+    except Exception as e:
+        print(f"  ⚠️ yt-dlp subs gagal: {str(e)[:80]}")
+        return None
+
+    entries: list[tuple[float, str]] = []
+    for p in sorted(glob.glob(os.path.join(subdir, "sub.*"))):
+        if p.lower().endswith((".vtt", ".srt")):
+            entries = _parse_caption_file(p)
+            if entries:
+                print(f"  📝 Transkrip via yt-dlp: {os.path.basename(p)} "
+                      f"({len(entries)} baris)")
+                break
+
+    if not entries:
+        print("  ⚠️ yt-dlp subs: tidak ada file caption ditemukan")
+        return None
+
+    lines = []
+    for ts, text in entries:
+        if start_sec is not None and (ts < start_sec or ts > end_sec):
+            continue
+        lines.append(f"[{seconds_to_hhmmss(ts)}] {text}")
+
+    return "\n".join(lines) if lines else None

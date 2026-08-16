@@ -6,6 +6,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from app.models.requests import ClipRequest, BatchClipRequest, GamingCompilationRequest
 from app.utils.helpers import seconds_to_hhmmss, extract_video_id, parse_time_range
 from app.services.pipeline import cut_video_task, _cut_video_impl, process_gaming_compilation
+from app.services.subtitles import fetch_transcript_via_ytdlp
 
 router = APIRouter()
 
@@ -29,19 +30,31 @@ async def get_transcript(url: str, range: str = ""):
 
         start_sec, end_sec = parse_time_range(range)
 
-        ytt_api = YouTubeTranscriptApi()
-        fetched = ytt_api.fetch(video_id, languages=['id', 'en'])
+        # ── Jalur utama: youtube-transcript-api (perilaku lama, non-member) ──
+        try:
+            ytt_api = YouTubeTranscriptApi()
+            fetched = ytt_api.fetch(video_id, languages=['id', 'en'])
 
-        formatted_lines = []
-        for snippet in fetched:
-            es = snippet.start
-            ee = snippet.start + snippet.duration
-            if start_sec is not None and (ee < start_sec or es > end_sec):
-                continue
-            timestamp = seconds_to_hhmmss(es)
-            formatted_lines.append(f"[{timestamp}] {snippet.text}")
+            formatted_lines = []
+            for snippet in fetched:
+                es = snippet.start
+                ee = snippet.start + snippet.duration
+                if start_sec is not None and (ee < start_sec or es > end_sec):
+                    continue
+                timestamp = seconds_to_hhmmss(es)
+                formatted_lines.append(f"[{timestamp}] {snippet.text}")
 
-        return {"transcript": "\n".join(formatted_lines)}
+            return {"transcript": "\n".join(formatted_lines)}
+
+        except Exception as api_err:
+            print(f"⚠️ youtube-transcript-api gagal ({str(api_err)[:80]}), "
+                  f"fallback yt-dlp subs...")
+
+        # ── Fallback: yt-dlp auto-subs (members-only / captions tak terdeteksi) ──
+        transcript = fetch_transcript_via_ytdlp(video_id, start_sec, end_sec)
+        if transcript:
+            return {"transcript": transcript}
+        return {"error": "Gagal ambil transkrip (youtube-transcript-api & yt-dlp subs)"}
 
     except Exception as e:
         return {"error": f"Gagal total: {str(e)}"}

@@ -17,11 +17,14 @@ Hasil: HD asli (720p/1080p) tanpa full-download, ~beberapa detik per section.
 """
 
 import os
+import re
+import time
 import struct
 import hashlib
+import threading
 import subprocess
 import urllib.request
-from app.config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, yt_dlp_cmd
+from app.config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, COOKIES_PATH, yt_dlp_cmd
 
 # Cascade format HD: (itag_video, label). Audio selalu itag 140 (m4a).
 HD_VIDEO_FORMATS = [
@@ -34,10 +37,30 @@ AUDIO_FORMAT = "140"
 
 # Client yang dipakai untuk extract URL. android_vr = satu-satunya yang kasih
 # format HD untuk live VOD (web/tv/mweb kena DRM/images-only).
+# Konten members-only umumnya butuh web/tv + sesi cookie → hanya dipakai sebagai
+# FALLBACK setelah android_vr gagal. Urutan tetap android_vr dulu → non-member
+# tidak berubah perilakunya.
 _PLAYER_CLIENT = "android_vr"
+_PLAYER_CLIENT_FALLBACKS = ("web", "tv")
 
 # Berapa detik ekstra fragmen diambil di ujung window (buffer aman).
 _TAIL_PAD_SEC = 6.0
+
+# ─────────────────────────────────────────
+# URL CACHE — googlevideo URL self-signed valid ~2 jam (param `expire`).
+# Caching per (video, itag) → 1 kompilasi cukup 2 ekstraksi, reuse semua klip.
+# ─────────────────────────────────────────
+_url_cache = {}
+_url_cache_lock = threading.Lock()
+_URL_CACHE_TTL_FALLBACK = 5400  # 90 menit jika param expire tak ter-parse
+
+
+def _url_expire_ts(url: str) -> float:
+    """Ambil waktu kedaluwarsa googlevideo URL dari param `expire`."""
+    m = re.search(r"[?&]expire=(\d+)", url)
+    if m:
+        return float(m.group(1))
+    return time.time() + _URL_CACHE_TTL_FALLBACK
 
 
 def _http_range(url: str, start: int, end: int, out_path: str, timeout: int = 60):
@@ -51,18 +74,48 @@ def _http_range(url: str, start: int, end: int, out_path: str, timeout: int = 60
 
 
 def _get_format_url(url: str, itag: str) -> str:
-    """Ambil direct googlevideo URL untuk satu itag via android_vr client."""
-    out = subprocess.check_output(
-        yt_dlp_cmd() + [
-            "--extractor-args", f"youtube:player_client={_PLAYER_CLIENT}",
-            "-f", itag, "-g", url,
-        ], text=True, timeout=90
-    )
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("http"):
-            return line
-    raise RuntimeError(f"URL kosong untuk itag {itag}")
+    """Ambil direct googlevideo URL untuk satu itag — cascade client.
+
+    Coba client utama (android_vr) dulu = perilaku lama untuk non-member.
+    Lalu client default (tanpa extractor-args — yt-dlp auto-pilih, mis. TVHTML5)
+    untuk konten members-only yang tidak diekspos android_vr/web/tv.
+    Hanya jika gagal, coba client fallback (web/tv).
+    URL di-cache per (url, itag) → dipakai ulang semua klip, ekstraksi minim.
+    """
+    key = (url, itag)
+    now = time.time()
+    with _url_cache_lock:
+        hit = _url_cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+
+    # android_vr → default (yt-dlp auto-pilih, mis. TVHTML5) → web → tv.
+    # None = tanpa --extractor-args: yt-dlp memilih client default-nya sendiri.
+    # Konten members-only tidak diekspos android_vr (skip cookies) / web / tv,
+    # tapi diekspos lewat client default → wajib dicoba setelah android_vr.
+    clients = (_PLAYER_CLIENT,) + (None,) + _PLAYER_CLIENT_FALLBACKS
+    last_err = None
+    for client in clients:
+        label = client if client else "default"
+        try:
+            cmd = yt_dlp_cmd()
+            if client:
+                cmd += ["--extractor-args", f"youtube:player_client={client}"]
+            cmd += ["-f", itag, "-g", url]
+            out = subprocess.check_output(cmd, text=True, timeout=90)
+            for line in out.splitlines():
+                line = line.strip()
+                if line.startswith("http"):
+                    if client != _PLAYER_CLIENT:
+                        print(f"   🎮 itag {itag} via client '{label}' (fallback)")
+                    with _url_cache_lock:
+                        _url_cache[key] = (_url_expire_ts(line), line)
+                    return line
+        except Exception as e:
+            last_err = e
+            print(f"   [client] itag {itag} via '{label}' gagal: {str(e)[:60]}")
+            continue
+    raise RuntimeError(f"URL kosong untuk itag {itag} ({str(last_err)[:60]})")
 
 
 def _parse_boxes(data: bytes):
@@ -301,3 +354,46 @@ def download_section_hd(url: str, start_sec: float, end_sec: float,
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     print(f"✅ HD section: {h}p [{chosen}], {size_mb:.1f}MB")
     return output_path
+
+
+# ─────────────────────────────────────────
+# COOKIE HEALTH CHECK — fail-fast sebelum kerja berat
+# ─────────────────────────────────────────
+
+def check_session_ok(url: str) -> None:
+    """Pastikan sesi cookies masih valid sebelum download konten member.
+
+    Raise RuntimeError dengan pesan jelas jika cookies invalid/roted, atau
+    akun tidak punya akses membership. Video publik tidak terblokir.
+    """
+    cmd = yt_dlp_cmd() + ["--print", "%(id)s", url]
+    try:
+        proc = subprocess.run(cmd, text=True, capture_output=True, timeout=120)
+    except Exception as e:
+        print(f"⚠️ Cek cookies gagal (biarkan pipeline lanjut): {str(e)[:60]}")
+        return
+
+    if proc.returncode == 0:
+        return
+
+    err = proc.stderr + proc.stdout
+    if "Join this channel" not in err:
+        print("⚠️ Ekstraksi video gagal (bukan masalah cookies) — lanjut pipeline.")
+        return
+
+    if not os.path.exists(COOKIES_PATH):
+        raise RuntimeError(
+            "🍪 youtube_cookies.txt tidak ditemukan — video members-only butuh "
+            "cookies. Export via 'Get cookies.txt LOCALLY' dari Chrome (login "
+            "akun member), timpa file-nya, lalu jalankan ulang."
+        )
+    if "cookies are no longer valid" in err:
+        raise RuntimeError(
+            "🍪 Cookies YouTube invalid/dirotasi. Export ulang via 'Get cookies.txt "
+            "LOCALLY' dari Chrome (login akun member), timpa youtube_cookies.txt, "
+            "lalu jalankan ulang."
+        )
+    raise RuntimeError(
+        "🔒 Video members-only, tapi akun tidak terdeteksi punya akses. Pastikan "
+        "Chrome login ke akun yang punya membership channel ini, lalu export ulang."
+    )

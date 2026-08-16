@@ -16,3 +16,6 @@ assets/models/*.onnx
 
 # Output videos
 output/
+
+# Cookies YouTube (bisa berisi data login sensitif — jangan commit)
+youtube_cookies.txt
