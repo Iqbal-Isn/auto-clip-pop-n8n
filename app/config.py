@@ -97,13 +97,18 @@ FFMPEG_EXE  = _find_exe("ffmpeg",  _FFMPEG_BIN_DIRS)
 FFPROBE_EXE = _find_exe("ffprobe", _FFMPEG_BIN_DIRS)
 
 
-def yt_dlp_cmd():
-    """Return base yt-dlp command, dengan cookies jika file tersedia"""
+def yt_dlp_cmd(use_cookies: bool = True):
+    """Return base yt-dlp command, dengan cookies jika file tersedia.
+
+    use_cookies=False → tanpa --cookies. Dipakai untuk ekstraksi client
+    android_vr (tidak mendukung cookies); cukup untuk video non-member.
+    Cookies hanya wajib untuk video members-only.
+    """
     scripts_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
     yt_dlp_exe = _find_exe("yt-dlp", [scripts_dir])
     cmd = [yt_dlp_exe, "--ffmpeg-location", FFMPEG_EXE, "--progress", "--newline",
            "--js-runtimes", "node", "--remote-components", "ejs:github"]
-    if os.path.exists(COOKIES_PATH):
+    if use_cookies and os.path.exists(COOKIES_PATH):
         cmd += ["--cookies", COOKIES_PATH]
         print("🍪 Menggunakan cookies YouTube")
     return cmd

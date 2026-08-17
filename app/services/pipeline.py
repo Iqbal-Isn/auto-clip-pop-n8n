@@ -9,6 +9,21 @@ from app.utils.helpers import seconds_to_hhmmss, hhmmss_to_seconds
 from app.services.subtitles import transcribe_audio, create_ass_from_whisper
 from app.services.filters import apply_tiktok_filter, apply_gaming_filter
 from app.services.transitions import concat_with_transitions, compress_to_target
+from app.services.hd_downloader import throttle_pause
+
+
+# ─────────────────────────────────────────
+# THROTTLE (403) MITIGATION
+# ─────────────────────────────────────────
+# Saat YouTube CDN memberi 403 (rate-limit per IP, transien):
+#   - HD byte-range di-retry beberapa kali di jalur yang SAMA dengan cooldown
+#     lebih lama (metode fallback lain dari IP yang sama pasti 403 juga).
+#   - Setelah STEP 1 paralel selesai, klip yang gagal di-retry lagi (retry pass)
+#     secara serial — throttle sudah reda.
+HD_RETRY_ATTEMPTS = 2       # percobaan ekstra di jalur HD (total 3x)
+HD_RETRY_PAUSE_SEC = 5.0    # jeda antar retry HD
+RETRY_PASS_ATTEMPTS = 2     # percobaan retry pass per klip
+RETRY_PASS_PAUSE_SEC = 10.0 # jeda antar retry pass
 
 
 # ─────────────────────────────────────────
@@ -84,6 +99,7 @@ def _download_full_video(url: str) -> str:
             print(f"   ❌ Gagal ({label}): {e}")
             if os.path.exists(cache_path):
                 os.remove(cache_path)
+            throttle_pause(f"full {label}")
             continue
 
     raise RuntimeError("Gagal download full video — semua format gagal")
@@ -120,17 +136,34 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
     # Ganti format progresif 22 yang sudah dihapus YouTube. Ambil hanya window
     # byte fragmen DASH → HD asli tanpa full-download. Fallback ke 360p jika gagal.
     # GUARD RESOLUSI: hasil wajib >= 720p — jika lebih rendah, anggap gagal & lanjut.
-    try:
-        from app.services.hd_downloader import download_section_hd
-        download_section_hd(url, start_sec, end_sec, output_path)
-        w, h = _probe_resolution(output_path)
-        if h < 720:
-            raise RuntimeError(f"HD <720p ({w}x{h})")
-        return output_path
-    except Exception as e:
-        print(f"⚠️ HD byte-range gagal / tidak 720p ({str(e)[:70]}), lanjut fallback...")
-        if os.path.exists(output_path):
-            os.remove(output_path)
+    # Saat error = 403 (throttle): retry di jalur yang SAMA dengan cooldown lebih
+    # lama. Setelah retry habis, langsung raise — jangan ke fallback section/
+    # direct/full yang dari IP yang sama pasti kena 403 juga. Klip di-retry lagi
+    # oleh retry pass di akhir STEP 1 (throttle sudah reda).
+    from app.services.hd_downloader import download_section_hd, _HDThrottleError
+    hd_attempt = 0
+    while True:
+        hd_attempt += 1
+        try:
+            download_section_hd(url, start_sec, end_sec, output_path)
+            w, h = _probe_resolution(output_path)
+            if h < 720:
+                raise RuntimeError(f"HD <720p ({w}x{h})")
+            return output_path
+        except _HDThrottleError as e:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            if hd_attempt <= HD_RETRY_ATTEMPTS:
+                print(f"⚠️ HD byte-range 403 (throttle) — retry {hd_attempt}/{HD_RETRY_ATTEMPTS} jalur sama...")
+                throttle_pause("HD retry", seconds=HD_RETRY_PAUSE_SEC)
+                continue
+            print(f"⚠️ HD byte-range 403 setelah retry habis — skip fallback (throttle): {str(e)[:60]}")
+            raise
+        except Exception as e:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            print(f"⚠️ HD byte-range gagal / tidak 720p ({str(e)[:70]}), lanjut fallback...")
+            break
 
     # ── STEP 1: Section via --download-sections — coba 720p dulu, lalu 360p ──
     # STEP 0 (HD byte-range) sudah menyelesaikan mayoritas kasus; step ini adalah
@@ -165,6 +198,7 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
             print(f"⚠️ Section {label} gagal ({str(e)[:60]}), lanjut...")
             if os.path.exists(output_path):
                 os.remove(output_path)
+            throttle_pause(f"section {label}")
 
     print("⚠️ Semua format section gagal, coba direct URL...")
 
@@ -199,6 +233,7 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
         print(f"⚠️ Direct URL gagal ({str(e)[:60]}), fallback full download...")
         if os.path.exists(output_path):
             os.remove(output_path)
+        throttle_pause("direct URL")
 
     # ── STEP 3: Full download + local cut (last resort) ──
     full_video = _download_full_video(url)
@@ -381,7 +416,7 @@ def process_gaming_compilation(url: str, clips: list[dict],
                                 facecam_position: str = "btmleft") -> dict:
     """
     Proses N klip gaming:
-    1. Parallel --download-sections (3 workers, CEPAT)
+    1. Parallel --download-sections (2 workers, CEPAT — kurangi burst agar tak kena 403)
     2. Whisper SKIP — mode gaming tanpa auto subtitle
     3. Parallel gaming filter + encode (3 workers)
     4. Concat dengan xfade transitions → 1 video final
@@ -411,9 +446,11 @@ def process_gaming_compilation(url: str, clips: list[dict],
 
     try:
         # ═══ STEP 1: Parallel download section LANGSUNG (CEPAT) ═══
-        print("⚡ STEP 1: Parallel download section (3 workers)...")
+        # 2 worker (bukan 3) + cooldown antar percobaan: YouTube CDN memberi 403
+        # rate-limit per IP bila terlalu banyak request dalam burst pendek.
+        print("⚡ STEP 1: Parallel download section (2 workers)...")
         import concurrent.futures as cf
-        with cf.ThreadPoolExecutor(max_workers=3) as pool:
+        with cf.ThreadPoolExecutor(max_workers=2) as pool:
             futures = {}
             for i, seg in enumerate(clips):
                 start_sec = hhmmss_to_seconds(seg["start"])
@@ -437,6 +474,36 @@ def process_gaming_compilation(url: str, clips: list[dict],
         if len(downloaded) < 1:
             raise RuntimeError("Semua download gagal — tidak bisa melanjutkan")
         print(f"  📊 {len(downloaded)}/{n} berhasil didownload\n")
+
+        # ═══ STEP 1b: RETRY PASS — klip yang gagal (throttle sudah reda) ═══
+        # Dilakukan serial (bukan paralel) agar tidak memicu burst request baru.
+        failed_idx = [i for i in range(n) if i not in downloaded]
+        if failed_idx:
+            print(f"🔄 STEP 1b: Retry pass untuk {len(failed_idx)} klip yang gagal...")
+            for i in failed_idx:
+                seg = clips[i]
+                start_sec = hhmmss_to_seconds(seg["start"])
+                end_sec = hhmmss_to_seconds(seg["end"])
+                prefix = f"g5_{seg['start'].replace(':', '')}_{i}"
+                tmp_yt = os.path.join(TMP_DIR, f"yt_dl_{prefix}.mp4")
+                for attempt in range(RETRY_PASS_ATTEMPTS):
+                    try:
+                        _download_section(url, start_sec, end_sec, tmp_yt)
+                        downloaded[i] = tmp_yt
+                        temp_files.append(tmp_yt)
+                        print(f"  ✅ Klip #{i+1} RETRY sukses: {seg['start']} → {seg['end']}"
+                              f" ({os.path.getsize(tmp_yt)/1024/1024:.1f}MB)")
+                        break
+                    except Exception as e:
+                        if os.path.exists(tmp_yt):
+                            os.remove(tmp_yt)
+                        if attempt + 1 < RETRY_PASS_ATTEMPTS:
+                            print(f"  ❌ Klip #{i+1} retry {attempt+1}/{RETRY_PASS_ATTEMPTS} gagal: "
+                                  f"{str(e)[:60]} — cooldown lalu coba lagi...")
+                            throttle_pause("retry pass", seconds=RETRY_PASS_PAUSE_SEC)
+                        else:
+                            print(f"  ❌ Klip #{i+1} retry pass GAGAL: {e}")
+            print(f"  📊 {len(downloaded)}/{n} berhasil didownload (setelah retry pass)\n")
 
         # ═══ STEP 2: Whisper SKIP — mode gaming tidak pakai auto subtitle ═══
         print("🔇 STEP 2: Whisper SKIP — gaming mode tanpa auto subtitle\n")

@@ -277,7 +277,21 @@ def fetch_transcript_via_ytdlp(video_id: str,
         return None
 
     entries: list[tuple[float, str]] = []
-    for p in sorted(glob.glob(os.path.join(subdir, "sub.*"))):
+    # Preferensi bahasa: Indonesian > original > English. Glob diurutkan alfabet
+    # ('sub.en.vtt' menang atas 'sub.id.vtt'), jadi kita urutkan ulang manual.
+    def _lang_rank(p: str) -> int:
+        base = os.path.basename(p)
+        if f"sub.id." in base:
+            return 0
+        if "original" in base:
+            return 1
+        if f"sub.en." in base:
+            return 2
+        return 99
+
+    files = sorted(glob.glob(os.path.join(subdir, "sub.*")),
+                   key=lambda p: (_lang_rank(p), p))
+    for p in files:
         if p.lower().endswith((".vtt", ".srt")):
             entries = _parse_caption_file(p)
             if entries:

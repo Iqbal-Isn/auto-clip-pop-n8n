@@ -36,10 +36,11 @@ HD_VIDEO_FORMATS = [
 AUDIO_FORMAT = "140"
 
 # Client yang dipakai untuk extract URL. android_vr = satu-satunya yang kasih
-# format HD untuk live VOD (web/tv/mweb kena DRM/images-only).
-# Konten members-only umumnya butuh web/tv + sesi cookie → hanya dipakai sebagai
-# FALLBACK setelah android_vr gagal. Urutan tetap android_vr dulu → non-member
-# tidak berubah perilakunya.
+# format HD untuk live VOD (web/tv/mweb kena DRM/images-only). Dijalankan TANPA
+# cookies: android_vr tidak mendukung cookies, dan jika cookies ikut di-pass
+# yt-dlp men-skip client ini → format HD hilang untuk video non-member.
+# Konten members-only butuh default/web/tv + sesi cookie → dipakai sebagai
+# FALLBACK setelah android_vr gagal.
 _PLAYER_CLIENT = "android_vr"
 _PLAYER_CLIENT_FALLBACKS = ("web", "tv")
 
@@ -47,12 +48,40 @@ _PLAYER_CLIENT_FALLBACKS = ("web", "tv")
 _TAIL_PAD_SEC = 6.0
 
 # ─────────────────────────────────────────
-# URL CACHE — googlevideo URL self-signed valid ~2 jam (param `expire`).
-# Caching per (video, itag) → 1 kompilasi cukup 2 ekstraksi, reuse semua klip.
+# URL CACHE (per-worker) — googlevideo URL self-signed valid ~2 jam.
+# Cache disimpan PER WORKER THREAD: tiap worker ekstrak & pakai URL-nya sendiri.
+# Ini menghindari byte-range request bersamaan ke URL yang SAMA — YouTube CDN
+# membalas 403 → penyebab gagal saat 3 worker paralel pakai 1 URL global.
 # ─────────────────────────────────────────
-_url_cache = {}
-_url_cache_lock = threading.Lock()
+_url_cache_local = threading.local()
 _URL_CACHE_TTL_FALLBACK = 5400  # 90 menit jika param expire tak ter-parse
+
+# Jeda antar percobaan download/ekstraksi (detik). YouTube CDN merespons 403
+# (rate-limit per IP) jika terlalu banyak request dalam burst pendek — terutama
+# dari cascade fallback yang agresif. Jeda ini menyebar request agar throttle
+# tidak terpicu / segera pulih.
+_THROTTLE_PAUSE_SEC = 2.0
+
+
+def throttle_pause(reason: str = "", seconds: float = _THROTTLE_PAUSE_SEC):
+    """Jeda singkat antar percobaan — kurangi burst request ke CDN YouTube."""
+    if reason:
+        print(f"   ⏳ Cooldown ({reason})...")
+    time.sleep(seconds)
+
+
+class _HDThrottleError(RuntimeError):
+    """HD byte-range gagal karena throttle HTTP 403 — tanda untuk retry/cooldown
+    pada jalur yang sama, BUKAN fallback ke metode lain (metode lain dari IP
+    yang sama pasti kena 403 juga)."""
+
+
+def _worker_url_cache() -> dict:
+    """Cache URL milik worker thread ini (tidak dishare antar worker)."""
+    cache = getattr(_url_cache_local, "cache", None)
+    if cache is None:
+        cache = _url_cache_local.cache = {}
+    return cache
 
 
 def _url_expire_ts(url: str) -> float:
@@ -76,29 +105,37 @@ def _http_range(url: str, start: int, end: int, out_path: str, timeout: int = 60
 def _get_format_url(url: str, itag: str) -> str:
     """Ambil direct googlevideo URL untuk satu itag — cascade client.
 
-    Coba client utama (android_vr) dulu = perilaku lama untuk non-member.
+    Coba client utama (android_vr) dulu = perilaku lama untuk non-member,
+    TANPA cookies (android_vr tidak mendukung cookies; jika cookies ikut
+    di-pass, yt-dlp men-skip client ini dan format HD live VOD hilang).
     Lalu client default (tanpa extractor-args — yt-dlp auto-pilih, mis. TVHTML5)
-    untuk konten members-only yang tidak diekspos android_vr/web/tv.
-    Hanya jika gagal, coba client fallback (web/tv).
-    URL di-cache per (url, itag) → dipakai ulang semua klip, ekstraksi minim.
+    DENGAN cookies untuk konten members-only yang tidak diekspos android_vr.
+    Hanya jika gagal, coba client fallback (web/tv) dengan cookies.
+    URL di-cache per (url, itag) DI DALAM worker yang sama → tiap worker pakai
+    URL sendiri, dipakai ulang untuk klip-klip yang diproses worker itu.
     """
     key = (url, itag)
     now = time.time()
-    with _url_cache_lock:
-        hit = _url_cache.get(key)
-        if hit and hit[0] > now:
-            return hit[1]
+    cache = _worker_url_cache()
+    hit = cache.get(key)
+    if hit and hit[0] > now:
+        return hit[1]
 
-    # android_vr → default (yt-dlp auto-pilih, mis. TVHTML5) → web → tv.
+    # android_vr (tanpa cookies) → default (dengan cookies) → web → tv.
     # None = tanpa --extractor-args: yt-dlp memilih client default-nya sendiri.
-    # Konten members-only tidak diekspos android_vr (skip cookies) / web / tv,
-    # tapi diekspos lewat client default → wajib dicoba setelah android_vr.
-    clients = (_PLAYER_CLIENT,) + (None,) + _PLAYER_CLIENT_FALLBACKS
+    # Video non-member cukup android_vr tanpa cookies. Video members-only:
+    # android_vr gagal → lanjut default/web/tv dengan cookies.
+    clients = [
+        (_PLAYER_CLIENT, False),   # android_vr — tanpa cookies
+        (None, True),              # default — dengan cookies
+        ("web", True),
+        ("tv", True),
+    ]
     last_err = None
-    for client in clients:
+    for client, use_cookies in clients:
         label = client if client else "default"
         try:
-            cmd = yt_dlp_cmd()
+            cmd = yt_dlp_cmd(use_cookies=use_cookies)
             if client:
                 cmd += ["--extractor-args", f"youtube:player_client={client}"]
             cmd += ["-f", itag, "-g", url]
@@ -108,12 +145,12 @@ def _get_format_url(url: str, itag: str) -> str:
                 if line.startswith("http"):
                     if client != _PLAYER_CLIENT:
                         print(f"   🎮 itag {itag} via client '{label}' (fallback)")
-                    with _url_cache_lock:
-                        _url_cache[key] = (_url_expire_ts(line), line)
+                    cache[key] = (_url_expire_ts(line), line)
                     return line
         except Exception as e:
             last_err = e
             print(f"   [client] itag {itag} via '{label}' gagal: {str(e)[:60]}")
+            throttle_pause(f"client {label}")
             continue
     raise RuntimeError(f"URL kosong untuk itag {itag} ({str(last_err)[:60]})")
 
@@ -213,7 +250,8 @@ def _window_for_range(frags, start_sec: float, end_sec: float):
 
 def _fetch_header_and_parse(url: str, token: str):
     """Ambil header (init+sidx) secara progresif lalu parse. Return
-    (init_len, frags) atau None."""
+    (init_len, frags) atau None. HTTP 403 (throttle) di-propagate agar caller
+    bisa membedakan throttle dari kegagalan biasa."""
     for probe_size in (512 * 1024, 2 * 1024 * 1024, 8 * 1024 * 1024):
         tmp = os.path.join(TMP_DIR, f"hdr_probe_{token}.bin")
         try:
@@ -223,7 +261,9 @@ def _fetch_header_and_parse(url: str, token: str):
             parsed = _parse_sidx(data)
             if parsed:
                 return parsed
-        except Exception:
+        except Exception as e:
+            if "403" in str(e):
+                raise
             pass
         finally:
             if os.path.exists(tmp):
@@ -279,6 +319,7 @@ def download_section_hd(url: str, start_sec: float, end_sec: float,
     if not audio_hdr:
         raise RuntimeError("audio: sidx tak terbaca")
 
+    seen_403 = False
     video_slice = video_frag_t = None
     chosen = None
     for itag, label in HD_VIDEO_FORMATS:
@@ -295,17 +336,27 @@ def download_section_hd(url: str, start_sec: float, end_sec: float,
             print(f"   🎯 HD byte-range: {label} (itag {itag})")
             break
         except Exception as e:
+            if "403" in str(e):
+                seen_403 = True
             print(f"   ⚠️ itag {itag} gagal: {str(e)[:60]}")
+            throttle_pause(f"itag {itag}")
             continue
 
     if not video_slice:
+        if seen_403:
+            raise _HDThrottleError("semua format HD gagal (403 throttle)")
         raise RuntimeError("semua format HD gagal")
 
     # ── STEP 2: unduh slice audio ──
     a_init, a_frags = audio_hdr
-    audio_slice, audio_frag_t = _download_stream_slice(
-        audio_url, a_init, a_frags, start_sec, end_sec, "a", token
-    )
+    try:
+        audio_slice, audio_frag_t = _download_stream_slice(
+            audio_url, a_init, a_frags, start_sec, end_sec, "a", token
+        )
+    except Exception as e:
+        if "403" in str(e):
+            raise _HDThrottleError(str(e)) from e
+        raise
 
     # ── STEP 3: potong TIAP stream terpisah dengan offset-nya sendiri ──
     # PENTING: window video & audio mulai di batas fragmen yang BERBEDA

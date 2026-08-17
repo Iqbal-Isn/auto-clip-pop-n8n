@@ -54,7 +54,7 @@
     },
     {
       "parameters": {
-        "url": "=http://host.docker.internal:8000/transcript?url={{ $('Telegram Trigger').item.json.message.text.trim().split(' ')[0] }}&range={{ $('Telegram Trigger').item.json.message.text.trim().split(' ')[1] ?? '' }}",
+        "url": "=http://host.docker.internal:8000/transcript?url={{ $('Telegram Trigger').item.json.message.text.trim().split(' ')[0] }}&range={{ ($('Telegram Trigger').item.json.message.text.trim().split(' ').find(p => /^\\d{1,2}:\\d{2}:\\d{2}-\\d{1,2}:\\d{2}:\\d{2}$/.test(p))) ?? '' }}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -428,7 +428,7 @@
     },
     {
       "parameters": {
-        "url": "=http://host.docker.internal:8000/transcript?url={{ $('Telegram Trigger').item.json.message.link_preview_options.url }}",
+        "url": "=http://host.docker.internal:8000/transcript",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -438,7 +438,7 @@
             },
             {
               "name": "range",
-              "value": "={{ $('Telegram Trigger').item.json.message.text.trim().split(' ').find(p => p.includes('-')) ?? '' }}"
+              "value": "={{ ($('Telegram Trigger').item.json.message.text.trim().split(' ').find(p => /^\\d{1,2}:\\d{2}:\\d{2}-\\d{1,2}:\\d{2}:\\d{2}$/.test(p))) ?? '' }}"
             }
           ]
         },
