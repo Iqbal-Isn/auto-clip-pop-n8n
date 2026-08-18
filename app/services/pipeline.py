@@ -1,6 +1,9 @@
 """Pipeline orkestrasi: download, Whisper subtitle, clip processing, gaming compilation."""
 
 import os
+import re as _re
+import hashlib
+import threading
 import subprocess
 import concurrent.futures
 from datetime import datetime
@@ -20,8 +23,6 @@ from app.services.hd_downloader import throttle_pause
 #     lebih lama (metode fallback lain dari IP yang sama pasti 403 juga).
 #   - Setelah STEP 1 paralel selesai, klip yang gagal di-retry lagi (retry pass)
 #     secara serial — throttle sudah reda.
-HD_RETRY_ATTEMPTS = 2       # percobaan ekstra di jalur HD (total 3x)
-HD_RETRY_PAUSE_SEC = 5.0    # jeda antar retry HD
 RETRY_PASS_ATTEMPTS = 2     # percobaan retry pass per klip
 RETRY_PASS_PAUSE_SEC = 10.0 # jeda antar retry pass
 
@@ -34,8 +35,10 @@ RETRY_PASS_PAUSE_SEC = 10.0 # jeda antar retry pass
 # FULL VIDEO CACHE — download sekali, potong lokal
 # ─────────────────────────────────────────
 
-import re as _re
-import hashlib
+# Kunci global: klip paralel dari video yang sama → hanya 1 thread yang download,
+# sisanya menunggu & memakai cache.
+_FULL_DL_LOCK = threading.Lock()
+
 
 def _extract_video_id(url: str) -> str:
     """Extract YouTube video ID dari URL."""
@@ -48,59 +51,65 @@ def _extract_video_id(url: str) -> str:
 
 def _download_full_video(url: str) -> str:
     """
-    Download FULL video SEKALI dengan format DASH HD → cache di TMP_DIR.
-    Return path ke file full video yang sudah di-download.
-    Full download (tanpa --download-sections) → standard yt-dlp code path,
-    lebih reliable daripada --download-sections untuk DASH.
+    Download FULL video SEKALI via client web_embedded → cache di TMP_DIR.
+    Return path ke file full video yang valid.
+
+    Sejak 2026 client android_vr/web/tv/mweb gagal mengunduh media (HTTP 403 /
+    butuh PO Token / SABR-only) untuk banyak video & IP. web_embedded adalah
+    satu-satunya client yang masih berhasil mengunduh media secara penuh.
     """
     video_id = _extract_video_id(url)
     cache_path = os.path.join(TMP_DIR, f"full_{video_id}.mp4")
 
+    # Cache hit — verifikasi file valid via ffprobe
     if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100000:
-        print(f"📦 Cache hit: {cache_path} ({os.path.getsize(cache_path)/1024/1024:.0f}MB)")
-        return cache_path
-
-    print(f"📥 Download FULL video (sekali untuk semua klip)...")
-    # Cascade: 360p progressive (itag 18, stabil & ringan) → best file tunggal.
-    # DASH HD (298/135) sengaja dihindari — kena HTTP 403 di client ANDROID_VR
-    # dan memaksa download full 1.6GB yang sangat lambat.
-    FORMAT_CASCADE = [
-        ("18",   "360p progressive"),
-        ("best", "merged"),
-    ]
-
-    for fmt, label in FORMAT_CASCADE:
         try:
-            print(f"   🎯 Mencoba: {label} ({fmt})...")
-            subprocess.run(
-                yt_dlp_cmd() + [
-                    "-f", fmt,
-                    "--merge-output-format", "mp4",
-                    "-o", cache_path,
-                    url
-                ], check=True, timeout=7200  # 2 jam untuk full video
-            )
-
-            # Cek resolusi
-            probe = subprocess.check_output([
-                FFPROBE_EXE, "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
-                "-of", "csv=p=0",
-                cache_path
-            ]).decode().strip()
-            w, h = probe.split(",")
-            size_gb = os.path.getsize(cache_path) / (1024**3)
-            print(f"   ✅ Full video: {w}x{h}, {size_gb:.1f}GB [{label}]")
-            if int(w) < 1280:
-                print(f"   ⚠️ {w}x{h} — facecam akan kurang tajam!")
+            _probe_resolution(cache_path)
+            print(f"📦 Cache hit: {cache_path} ({os.path.getsize(cache_path)/1024/1024:.0f}MB)")
             return cache_path
-        except Exception as e:
-            print(f"   ❌ Gagal ({label}): {e}")
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
-            throttle_pause(f"full {label}")
-            continue
+        except Exception:
+            print("⚠️ Cache korup, download ulang...")
+            os.remove(cache_path)
+
+    with _FULL_DL_LOCK:
+        # Double-check setelah dapat lock (thread lain mungkin sudah download)
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100000:
+            print(f"📦 Cache hit (lock): {cache_path}")
+            return cache_path
+
+        print(f"📥 Download FULL video (sekali untuk semua klip)...")
+        # Cascade: AVC mp4 720p (paling tajam & cocok facecam) → 360p progressive.
+        FORMAT_CASCADE = [
+            ("bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]",
+             "720p AVC merged"),
+            ("18/best[height<=480]/best", "360p progressive"),
+        ]
+
+        for fmt, label in FORMAT_CASCADE:
+            try:
+                print(f"   🎯 Mencoba: {label} ({fmt})...")
+                subprocess.run(
+                    yt_dlp_cmd() + [
+                        "--extractor-args", "youtube:player_client=web_embedded",
+                        "-f", fmt,
+                        "--merge-output-format", "mp4",
+                        "-o", cache_path,
+                        url
+                    ], check=True, timeout=7200  # 2 jam untuk full video
+                )
+
+                w, h = _probe_resolution(cache_path)
+                size_gb = os.path.getsize(cache_path) / (1024**3)
+                print(f"   ✅ Full video: {w}x{h}, {size_gb:.1f}GB [{label}]")
+                if int(w) < 1280:
+                    print(f"   ⚠️ {w}x{h} — facecam akan kurang tajam!")
+                return cache_path
+            except Exception as e:
+                print(f"   ❌ Gagal ({label}): {str(e)[:80]}")
+                if os.path.exists(cache_path):
+                    os.remove(cache_path)
+                throttle_pause(f"full {label}")
+                continue
 
     raise RuntimeError("Gagal download full video — semua format gagal")
 
@@ -120,11 +129,12 @@ def _probe_resolution(path: str) -> tuple[int, int]:
 
 def _download_section(url: str, start_sec: float, end_sec: float, output_path: str):
     """
-    Download section — prioritas HD 720p/1080p (byte-range fMP4), fallback 360p.
-    0. HD byte-range (720p/1080p, via sidx fMP4) — guard: harus >= 720p
-    1. Progressive 360p via --download-sections — tercepat
-    2. Progressive 360p via direct URL + ffmpeg remote seek
-    3. Fallback full download + local cut
+    Download section:
+    0. HD byte-range fMP4 (720p/1080p) — jalur cepat OPTIONAL. Sejak 2026
+       YouTube CDN menolak byte-range lompat jauh (HTTP 403) untuk banyak
+       video & IP → jika gagal (termasuk 403), LANGSUNG fallback, tidak retry.
+    1. Full download via web_embedded (sekali per video, cache) + potong lokal —
+       jalur andal utama. --download-sections DASH digantung YouTube, tidak dipakai.
     """
     start_str = seconds_to_hhmmss(start_sec)
     end_str = seconds_to_hhmmss(end_sec)
@@ -132,110 +142,22 @@ def _download_section(url: str, start_sec: float, end_sec: float, output_path: s
 
     print(f"⚡ Download section {start_str} → {end_str}...")
 
-    # ── STEP 0: HD byte-range fMP4 (720p/1080p, ~beberapa detik) ──
-    # Ganti format progresif 22 yang sudah dihapus YouTube. Ambil hanya window
-    # byte fragmen DASH → HD asli tanpa full-download. Fallback ke 360p jika gagal.
-    # GUARD RESOLUSI: hasil wajib >= 720p — jika lebih rendah, anggap gagal & lanjut.
-    # Saat error = 403 (throttle): retry di jalur yang SAMA dengan cooldown lebih
-    # lama. Setelah retry habis, langsung raise — jangan ke fallback section/
-    # direct/full yang dari IP yang sama pasti kena 403 juga. Klip di-retry lagi
-    # oleh retry pass di akhir STEP 1 (throttle sudah reda).
-    from app.services.hd_downloader import download_section_hd, _HDThrottleError
-    hd_attempt = 0
-    while True:
-        hd_attempt += 1
-        try:
-            download_section_hd(url, start_sec, end_sec, output_path)
-            w, h = _probe_resolution(output_path)
-            if h < 720:
-                raise RuntimeError(f"HD <720p ({w}x{h})")
-            return output_path
-        except _HDThrottleError as e:
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            if hd_attempt <= HD_RETRY_ATTEMPTS:
-                print(f"⚠️ HD byte-range 403 (throttle) — retry {hd_attempt}/{HD_RETRY_ATTEMPTS} jalur sama...")
-                throttle_pause("HD retry", seconds=HD_RETRY_PAUSE_SEC)
-                continue
-            print(f"⚠️ HD byte-range 403 setelah retry habis — skip fallback (throttle): {str(e)[:60]}")
-            raise
-        except Exception as e:
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            print(f"⚠️ HD byte-range gagal / tidak 720p ({str(e)[:70]}), lanjut fallback...")
-            break
-
-    # ── STEP 1: Section via --download-sections — coba 720p dulu, lalu 360p ──
-    # STEP 0 (HD byte-range) sudah menyelesaikan mayoritas kasus; step ini adalah
-    # jalan kedua untuk video members-only / kasus HD yang gagal. Prioritas:
-    #   1. 720p DASH merged (bv*≤720 + ba) — via default client + cookies (bukan
-    #      android_vr) umumnya tidak kena HTTP 403.
-    #   2. 360p progressive (itag 18) — stabil & cepat, fallback terakhir.
-    section_cascade = [
-        ("bv*[height<=720]+ba/b[height<=720]", "720p DASH merged"),
-        ("18/best[height<=480]/best", "360p progressive"),
-    ]
-    for fmt, label in section_cascade:
-        try:
-            subprocess.run(
-                yt_dlp_cmd() + [
-                    "--download-sections", f"*{start_str}-{end_str}",
-                    "-f", fmt,
-                    "--merge-output-format", "mp4",
-                    "-o", output_path,
-                    url
-                ], check=True, timeout=180
-            )
-            w, h = _probe_resolution(output_path)
-            size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            if h < 720:
-                print(f"🟡 Resolusi {w}x{h} (<720p — HD gagal, {label}): hasil mungkin agak buram, "
-                      f"dikompensasi sharpen di filter.")
-            else:
-                print(f"✅ Section ({label}): {h}p, {size_mb:.1f}MB")
-            return output_path
-        except Exception as e:
-            print(f"⚠️ Section {label} gagal ({str(e)[:60]}), lanjut...")
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            throttle_pause(f"section {label}")
-
-    print("⚠️ Semua format section gagal, coba direct URL...")
-
-    # ── STEP 2: Progressive 360p (itag 18) direct URL + ffmpeg remote seek ──
-    # File tunggal → tidak kena 403 seperti DASH. Remote seek = ambil section saja.
+    # ── STEP 0: HD byte-range fMP4 (opsional, cepat) ──
+    from app.services.hd_downloader import download_section_hd
     try:
-        print("🔗 Direct URL 360p (itag 18) + remote seek...")
-        raw = subprocess.check_output(
-            yt_dlp_cmd() + ["-f", "18/best[height<=480]", "-g", url],
-            text=True, timeout=60
-        ).strip()
-        urls = [u for u in raw.split('\n') if u.startswith('http')]
-
-        print(f"🎬 ffmpeg remote seek...")
-        subprocess.run([
-            FFMPEG_EXE,
-            "-ss", start_str, "-i", urls[0],
-            "-t", str(duration),
-            "-c:v", "copy", "-c:a", "copy",
-            "-avoid_negative_ts", "make_zero",
-            output_path, "-y"
-        ], check=True, timeout=120)
-
+        download_section_hd(url, start_sec, end_sec, output_path)
         w, h = _probe_resolution(output_path)
-        size_mb = os.path.getsize(output_path) / (1024 * 1024)
         if h < 720:
-            print(f"🟡 Resolusi {w}x{h} (<720p — HD gagal): hasil mungkin agak buram.")
-        print(f"✅ Direct 360p: {h}p, {size_mb:.1f}MB")
+            raise RuntimeError(f"HD <720p ({w}x{h})")
         return output_path
-
     except Exception as e:
-        print(f"⚠️ Direct URL gagal ({str(e)[:60]}), fallback full download...")
         if os.path.exists(output_path):
             os.remove(output_path)
-        throttle_pause("direct URL")
+        print(f"⚠️ HD byte-range gagal ({str(e)[:70]}) — fallback full download + cut lokal...")
 
-    # ── STEP 3: Full download + local cut (last resort) ──
+    # ── STEP 1: Full download (sekali per video, cache) + potong lokal ──
+    # Download penuh via web_embedded andal; --download-sections DASH digantung
+    # YouTube. Potongan lokal stream-copy = instan.
     full_video = _download_full_video(url)
     _cut_section_locally(full_video, start_sec, end_sec, output_path)
     return output_path

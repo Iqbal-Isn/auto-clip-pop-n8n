@@ -264,13 +264,20 @@ def fetch_transcript_via_ytdlp(video_id: str,
         subprocess.run(
             yt_dlp_cmd() + [
                 "--skip-download",
+                # Client web_embedded: subs TIDAK butuh PO Token (web client
+                # membuang subtitle tanpa PO token → tidak ada file caption).
+                # Didukung cookies → akses konten members-only.
+                "--extractor-args", "youtube:player_client=web_embedded",
+                # Paksa format tersedia (storyboard) agar yt-dlp tidak gagal
+                # "Requested format is not available" saat --skip-download.
+                "-f", "sb0",
                 "--write-auto-subs", "--write-subs",
                 "--sub-langs", "id.*,en.*,original",
                 "--sub-format", "vtt/srt",
                 "--no-playlist",
                 "-o", os.path.join(subdir, "sub.%(ext)s"),
                 url,
-            ], check=True, timeout=120, capture_output=True
+            ], check=True, timeout=180, capture_output=True
         )
     except Exception as e:
         print(f"  ⚠️ yt-dlp subs gagal: {str(e)[:80]}")

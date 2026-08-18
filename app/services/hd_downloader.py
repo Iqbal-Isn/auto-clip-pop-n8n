@@ -338,6 +338,10 @@ def download_section_hd(url: str, start_sec: float, end_sec: float,
         except Exception as e:
             if "403" in str(e):
                 seen_403 = True
+                # 403 pada byte-range = gate media per-video/IP (YouTube menolak
+                # lompat range jauh). Format lain dari IP yang sama pasti 403 juga
+                # → fail-fast, biarkan pipeline langsung ke fallback full download.
+                raise _HDThrottleError("byte-range 403 — skip cascade") from e
             print(f"   ⚠️ itag {itag} gagal: {str(e)[:60]}")
             throttle_pause(f"itag {itag}")
             continue
