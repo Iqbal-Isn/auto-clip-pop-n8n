@@ -2,12 +2,14 @@
 
 import os
 import re as _re
+import time
 import hashlib
 import threading
 import subprocess
 import concurrent.futures
 from datetime import datetime
-from app.config import FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, OUTPUT_DIR, TRANSISI_SOUND, yt_dlp_cmd
+from app.config import (FFMPEG_EXE, FFPROBE_EXE, TMP_DIR, OUTPUT_DIR, TRANSISI_SOUND,
+                        yt_dlp_cmd, FULL_CACHE_MAX_AGE_HOURS, FULL_CACHE_MAX_TOTAL_GB)
 from app.utils.helpers import seconds_to_hhmmss, hhmmss_to_seconds
 from app.services.subtitles import transcribe_audio, create_ass_from_whisper
 from app.services.filters import apply_tiktok_filter, apply_gaming_filter
@@ -49,69 +51,163 @@ def _extract_video_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:12]
 
 
+# ─────────────────────────────────────────
+# CACHE CLEANUP — cegah disk penuh oleh full_{id}.mp4 (1-3GB per video)
+# ─────────────────────────────────────────
+
+def cleanup_full_video_cache(keep_url: str | None = None):
+    """Bersihkan cache full video di TMP_DIR:
+    1. Hapus yang berumur > FULL_CACHE_MAX_AGE_HOURS.
+    2. Jika total masih > FULL_CACHE_MAX_TOTAL_GB, hapus tertua dulu.
+       File yang sedang dipakai run ini (keep_url) tidak pernah dihapus.
+    Juga sapu file staging .dl.mp4 yang basi (proses mati di tengah download).
+    """
+    keep_id = _extract_video_id(keep_url) if keep_url else None
+    now = time.time()
+    entries = []  # (mtime, size, path)
+    try:
+        for fn in os.listdir(TMP_DIR):
+            if not (fn.startswith("full_") and fn.endswith(".mp4")):
+                continue
+            if keep_id and fn == f"full_{keep_id}.mp4":
+                continue
+            p = os.path.join(TMP_DIR, fn)
+            try:
+                st = os.stat(p)
+                entries.append((st.st_mtime, st.st_size, p))
+            except OSError:
+                pass
+    except OSError:
+        return
+
+    removed_bytes = 0
+    kept = []
+    for mtime, size, p in sorted(entries):  # tertua dulu
+        age_h = (now - mtime) / 3600
+        if age_h > FULL_CACHE_MAX_AGE_HOURS:
+            try:
+                os.remove(p)
+                removed_bytes += size
+            except OSError:
+                pass
+        else:
+            kept.append((mtime, size, p))
+
+    # Enforce batas total: hapus tertua dulu sampai masuk kuota
+    total = sum(s for _, s, _ in kept)
+    limit = FULL_CACHE_MAX_TOTAL_GB * 1024**3
+    while total > limit and kept:
+        mtime, size, p = kept.pop(0)  # tertua
+        try:
+            os.remove(p)
+            total -= size
+            removed_bytes += size
+        except OSError:
+            pass
+
+    # Sapu staging basi (unduhan mati di tengah jalan) — aman: file .dl aktif
+    # sedang ditulis & akan di-replace, hapus yang berumur > 6 jam saja.
+    for fn in os.listdir(TMP_DIR):
+        if fn.startswith("full_") and ".dl." in fn:
+            p = os.path.join(TMP_DIR, fn)
+            try:
+                if now - os.stat(p).st_mtime > 6 * 3600:
+                    os.remove(p)
+            except OSError:
+                pass
+
+    if removed_bytes:
+        print(f"🧹 Cache cleanup: {removed_bytes/1024**3:.1f}GB dibebaskan "
+              f"(sisanya {total/1024**3:.1f}GB)")
+
+
 def _download_full_video(url: str) -> str:
     """
     Download FULL video SEKALI via client web_embedded → cache di TMP_DIR.
     Return path ke file full video yang valid.
 
-    Sejak 2026 client android_vr/web/tv/mweb gagal mengunduh media (HTTP 403 /
-    butuh PO Token / SABR-only) untuk banyak video & IP. web_embedded adalah
-    satu-satunya client yang masih berhasil mengunduh media secara penuh.
+    Prioritas 720p AVC merged (tajam untuk facecam). Cache low-res (<720p)
+    dari run sebelumnya TIDAK dipakai permanen — tiap run dicoba upgrade
+    720p dulu; cache low-res hanya dipakai jika upgrade gagal (403 throttle),
+    agar klip tetap jadi walau kurang tajam.
     """
     video_id = _extract_video_id(url)
     cache_path = os.path.join(TMP_DIR, f"full_{video_id}.mp4")
+    # staging: download ke file sementara agar cache lama tak rusak jika gagal
+    tmp_path = cache_path + ".dl.mp4"
 
-    # Cache hit — verifikasi file valid via ffprobe
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100000:
-        try:
-            _probe_resolution(cache_path)
-            print(f"📦 Cache hit: {cache_path} ({os.path.getsize(cache_path)/1024/1024:.0f}MB)")
-            return cache_path
-        except Exception:
-            print("⚠️ Cache korup, download ulang...")
-            os.remove(cache_path)
+    def _cached_res():
+        """Return (w,h) jika cache valid; None jika tidak ada (korup → hapus)."""
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100000:
+            try:
+                return _probe_resolution(cache_path)
+            except Exception:
+                print("⚠️ Cache korup, download ulang...")
+                os.remove(cache_path)
+        return None
 
     with _FULL_DL_LOCK:
         # Double-check setelah dapat lock (thread lain mungkin sudah download)
-        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100000:
-            print(f"📦 Cache hit (lock): {cache_path}")
+        res = _cached_res()
+        if res and res[1] >= 720:
+            print(f"📦 Cache hit: {cache_path} "
+                  f"({os.path.getsize(cache_path)/1024/1024:.0f}MB, {res[0]}x{res[1]})")
             return cache_path
+        if res:
+            print(f"📦 Cache low-res {res[0]}x{res[1]} — coba upgrade 720p...")
 
-        print(f"📥 Download FULL video (sekali untuk semua klip)...")
-        # Cascade: AVC mp4 720p (paling tajam & cocok facecam) → 360p progressive.
-        FORMAT_CASCADE = [
-            ("bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]",
-             "720p AVC merged"),
-            ("18/best[height<=480]/best", "360p progressive"),
-        ]
-
-        for fmt, label in FORMAT_CASCADE:
+        # ── 720p AVC merged: 2 percobaan + cooldown (403 throttle transien) ──
+        fmt_720 = ("bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]"
+                   "/bv*[height<=720]+ba/b[height<=720]")
+        for attempt in (1, 2):
             try:
-                print(f"   🎯 Mencoba: {label} ({fmt})...")
+                print(f"   🎯 Mencoba: 720p AVC merged (percobaan {attempt})...")
                 subprocess.run(
                     yt_dlp_cmd() + [
                         "--extractor-args", "youtube:player_client=web_embedded",
-                        "-f", fmt,
+                        "-f", fmt_720,
                         "--merge-output-format", "mp4",
-                        "-o", cache_path,
+                        "-o", tmp_path,
                         url
                     ], check=True, timeout=7200  # 2 jam untuk full video
                 )
-
-                w, h = _probe_resolution(cache_path)
+                w, h = _probe_resolution(tmp_path)
+                os.replace(tmp_path, cache_path)
                 size_gb = os.path.getsize(cache_path) / (1024**3)
-                print(f"   ✅ Full video: {w}x{h}, {size_gb:.1f}GB [{label}]")
-                if int(w) < 1280:
-                    print(f"   ⚠️ {w}x{h} — facecam akan kurang tajam!")
+                print(f"   ✅ Full video: {w}x{h}, {size_gb:.1f}GB [720p merged]")
                 return cache_path
             except Exception as e:
-                print(f"   ❌ Gagal ({label}): {str(e)[:80]}")
-                if os.path.exists(cache_path):
-                    os.remove(cache_path)
-                throttle_pause(f"full {label}")
-                continue
+                print(f"   ❌ Gagal (720p, percobaan {attempt}): {str(e)[:80]}")
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                throttle_pause("full 720p", seconds=10.0)
 
-    raise RuntimeError("Gagal download full video — semua format gagal")
+        # ── 720p gagal: pakai cache low-res lama jika ada (klip tetap jadi) ──
+        if res:
+            print(f"   ⚠️ 720p gagal — pakai cache low-res {res[0]}x{res[1]} "
+                  f"(klip akan kurang tajam)")
+            return cache_path
+
+        # ── 360p progressive — jalan terakhir agar klip tetap diproduksi ──
+        try:
+            print("   🎯 Mencoba: 360p progressive (fallback terakhir)...")
+            subprocess.run(
+                yt_dlp_cmd() + [
+                    "--extractor-args", "youtube:player_client=web_embedded",
+                    "-f", "18/best[height<=480]/best",
+                    "--merge-output-format", "mp4",
+                    "-o", tmp_path,
+                    url
+                ], check=True, timeout=7200
+            )
+            os.replace(tmp_path, cache_path)
+            w, h = _probe_resolution(cache_path)
+            print(f"   ⚠️ Full video: {w}x{h} [360p] — kualitas rendah!")
+            return cache_path
+        except Exception as e:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise RuntimeError(f"Gagal download full video: {str(e)[:80]}")
 
 
 def _probe_resolution(path: str) -> tuple[int, int]:
@@ -359,6 +455,9 @@ def process_gaming_compilation(url: str, clips: list[dict],
         print(f"  Klip #{i+1}: {seg['start']} → {seg['end']}")
     print(f"{'='*50}\n")
 
+    # Bebaskan disk dari cache run sebelumnya (video INI dilindungi).
+    cleanup_full_video_cache(keep_url=url)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output = os.path.join(OUTPUT_DIR, f"gaming_compilation_{timestamp}.mp4")
 
@@ -367,31 +466,26 @@ def process_gaming_compilation(url: str, clips: list[dict],
     temp_files = []
 
     try:
-        # ═══ STEP 1: Parallel download section LANGSUNG (CEPAT) ═══
-        # 2 worker (bukan 3) + cooldown antar percobaan: YouTube CDN memberi 403
-        # rate-limit per IP bila terlalu banyak request dalam burst pendek.
-        print("⚡ STEP 1: Parallel download section (2 workers)...")
-        import concurrent.futures as cf
-        with cf.ThreadPoolExecutor(max_workers=2) as pool:
-            futures = {}
-            for i, seg in enumerate(clips):
-                start_sec = hhmmss_to_seconds(seg["start"])
-                end_sec = hhmmss_to_seconds(seg["end"])
-                prefix = f"g5_{seg['start'].replace(':', '')}_{i}"
-                tmp_yt = os.path.join(TMP_DIR, f"yt_dl_{prefix}.mp4")
-
-                fut = pool.submit(_download_section, url, start_sec, end_sec, tmp_yt)
-                futures[fut] = (i, seg, tmp_yt)
-
-            for fut in cf.as_completed(futures):
-                i, seg, tmp_yt = futures[fut]
-                try:
-                    fut.result()
-                    downloaded[i] = tmp_yt
-                    temp_files.append(tmp_yt)
-                    print(f"  ✅ Klip #{i+1}: {seg['start']} → {seg['end']} ({os.path.getsize(tmp_yt)/1024/1024:.1f}MB)")
-                except Exception as e:
-                    print(f"  ❌ Klip #{i+1} download GAGAL: {e}")
+        # ═══ STEP 1: Download section SEQUENTIAL (anti-burst) ═══
+        # BURST request paralel = pemicu utama throttle 403 GVS. HD byte-range
+        # kini mem-cache URL + header sidx + init segment per worker, jadi klip
+        # pertama warm-up dan klip berikutnya hanya butuh 2 range request —
+        # serial tetap cepat TANPA memicu 403.
+        print("⚡ STEP 1: Download section (sequential, anti-burst)...")
+        for i, seg in enumerate(clips):
+            start_sec = hhmmss_to_seconds(seg["start"])
+            end_sec = hhmmss_to_seconds(seg["end"])
+            prefix = f"g5_{seg['start'].replace(':', '')}_{i}"
+            tmp_yt = os.path.join(TMP_DIR, f"yt_dl_{prefix}.mp4")
+            try:
+                _download_section(url, start_sec, end_sec, tmp_yt)
+                downloaded[i] = tmp_yt
+                temp_files.append(tmp_yt)
+                print(f"  ✅ Klip #{i+1}: {seg['start']} → {seg['end']} ({os.path.getsize(tmp_yt)/1024/1024:.1f}MB)")
+            except Exception as e:
+                print(f"  ❌ Klip #{i+1} download GAGAL: {e}")
+                if os.path.exists(tmp_yt):
+                    os.remove(tmp_yt)
 
         if len(downloaded) < 1:
             raise RuntimeError("Semua download gagal — tidak bisa melanjutkan")

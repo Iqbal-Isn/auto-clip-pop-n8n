@@ -18,6 +18,7 @@ Hasil: HD asli (720p/1080p) tanpa full-download, ~beberapa detik per section.
 
 import os
 import re
+import json
 import time
 import struct
 import hashlib
@@ -35,14 +36,23 @@ HD_VIDEO_FORMATS = [
 ]
 AUDIO_FORMAT = "140"
 
-# Client yang dipakai untuk extract URL. android_vr = satu-satunya yang kasih
-# format HD untuk live VOD (web/tv/mweb kena DRM/images-only). Dijalankan TANPA
-# cookies: android_vr tidak mendukung cookies, dan jika cookies ikut di-pass
-# yt-dlp men-skip client ini → format HD hilang untuk video non-member.
-# Konten members-only butuh default/web/tv + sesi cookie → dipakai sebagai
-# FALLBACK setelah android_vr gagal.
-_PLAYER_CLIENT = "android_vr"
-_PLAYER_CLIENT_FALLBACKS = ("web", "tv")
+# Selector audio: video multi-audio-track tidak punya itag plain "140" —
+# ID formatnya disuffiks bahasa (140-0, 140-1, 140-drc, dst). Fallback
+# "ba[ext=m4a]" tetap me-resolve SATU format m4a apa pun pelabelannya.
+_AUDIO_SELECTOR = "140/ba[ext=m4a]"
+
+# Client untuk extract URL direct googlevideo. web_embedded = client yang
+# PROVEN bisa mengunduh media (client yang sama dengan jalur full-download)
+# → URL-nya menerima HTTP Range dari IP yang sama. android_vr/web/tv
+# sering menolak akses media langsung (HTTP 403, butuh PO token) → hanya
+# dipakai sebagai fallback. web_embedded dijalankan DENGAN cookies; android_vr
+# tanpa cookies (tidak mendukung cookies).
+_PLAYER_CLIENT = "web_embedded"
+_PLAYER_CLIENT_FALLBACKS = ("android_vr", "web", "tv")
+
+# Fallback User-Agent bila http_headers tidak tersedia dari yt-dlp.
+_UA_BROWSER = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
 # Berapa detik ekstra fragmen diambil di ujung window (buffer aman).
 _TAIL_PAD_SEC = 6.0
@@ -55,6 +65,63 @@ _TAIL_PAD_SEC = 6.0
 # ─────────────────────────────────────────
 _url_cache_local = threading.local()
 _URL_CACHE_TTL_FALLBACK = 5400  # 90 menit jika param expire tak ter-parse
+
+# ─────────────────────────────────────────
+# DISK CACHE untuk URL yang TERBUKTI bisa jump (ungated).
+# Gate jump-range GVS pada live VOD bersifat roulette per-mint: URL yang
+# kebetulan di-mint bebas gate itu langka & berharga — URL tsb valid ~6 jam
+# dan bisa melayani SEMUA klip + run berikutnya. Simpan ke disk agar tidak
+# hilang saat proses restart.
+# ─────────────────────────────────────────
+_DISK_CACHE_PATH = os.path.join(TMP_DIR, "hd_url_cache.json")
+_DISK_CACHE_LOCK = threading.Lock()
+
+
+def _disk_cache_load() -> dict:
+    try:
+        with open(_DISK_CACHE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _disk_cache_save(data: dict):
+    try:
+        with open(_DISK_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def _disk_cache_get(video_id: str, itag: str):
+    """Return (url, headers) jika ada URL ungated tersimpan & belum expired."""
+    with _DISK_CACHE_LOCK:
+        data = _disk_cache_load()
+    entry = data.get(f"{video_id}:{itag}")
+    if not entry:
+        return None
+    if entry.get("expire", 0) < time.time() + 300:  # sisa < 5 menit → anggap basi
+        return None
+    return entry["url"], dict(entry.get("headers") or {})
+
+
+def _disk_cache_put(video_id: str, itag: str, url: str, headers: dict):
+    """Simpan URL yang TERBUKTI lolos jump-range (206) ke disk."""
+    with _DISK_CACHE_LOCK:
+        data = _disk_cache_load()
+        data[f"{video_id}:{itag}"] = {
+            "url": url,
+            "headers": dict(headers or {}),
+            "expire": _url_expire_ts(url),
+        }
+        _disk_cache_save(data)
+        print(f"   💾 URL ungated disimpan ke disk cache (itag {itag}, valid ~6 jam)")
+
+# Ekstraksi URL di-SERIALIZE global: banyak proses yt-dlp paralel dalam burst
+# pendek memicu bot-detection YouTube → URL yang dihasilkan ditolak GVS dengan
+# 403 walau header benar. Tiap worker tetap dapat URL sendiri, tapi proses
+# ekstraksinya antre satu per satu.
+_EXTRACT_LOCK = threading.Lock()
 
 # Jeda antar percobaan download/ekstraksi (detik). YouTube CDN merespons 403
 # (rate-limit per IP) jika terlalu banyak request dalam burst pendek — terutama
@@ -76,11 +143,50 @@ class _HDThrottleError(RuntimeError):
     yang sama pasti kena 403 juga)."""
 
 
+def _retry_on_403(fn, tries: int = 3, pause: float = 3.0, label: str = ""):
+    """Retry callable pada URL yang SAMA saat HTTP 403.
+
+    Temuan empiris: gate jump-range GVS sering hanya menolak percobaan
+    PERTAMA untuk satu URL — retry URL yang sama setelah cooldown ~3 detik
+    dijawab 206, dan begitu lolos sekali, URL tsb tetap terbuka untuk semua
+    jump-range berikutnya (inilah "URL jackpot" di disk cache). Rotasi
+    client/evict URL (jalur lama) justru membuang URL yang sebenarnya masih
+    bisa hidup dan mendarat di client tanpa PO token yang pasti 403.
+    """
+    last = None
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as e:
+            if "403" not in str(e):
+                raise
+            last = e
+            if i < tries - 1:
+                print(f"   ⚠️ 403 ({label}, try {i + 1}/{tries}) — "
+                      f"retry URL sama + cooldown...")
+                time.sleep(pause)
+    raise last
+
+
 def _worker_url_cache() -> dict:
     """Cache URL milik worker thread ini (tidak dishare antar worker)."""
     cache = getattr(_url_cache_local, "cache", None)
     if cache is None:
         cache = _url_cache_local.cache = {}
+    return cache
+
+
+def _worker_media_cache() -> dict:
+    """Cache (sidx frags, init bytes) per googlevideo URL — milik worker ini.
+
+    Header sidx dan init segment (ftyp+moov) IDENTIK untuk satu URL, jadi cukup
+    diambil SEKALI lalu dipakai ulang untuk semua klip yang diproses worker ini.
+    Ini memangkas jumlah byte-range request per klip (mis. 6-10 → 2) — burst
+    request adalah pemicu utama throttle 403 GVS.
+    """
+    cache = getattr(_url_cache_local, "media", None)
+    if cache is None:
+        cache = _url_cache_local.media = {}
     return cache
 
 
@@ -92,9 +198,23 @@ def _url_expire_ts(url: str) -> float:
     return time.time() + _URL_CACHE_TTL_FALLBACK
 
 
-def _http_range(url: str, start: int, end: int, out_path: str, timeout: int = 60):
-    """GET satu byte-range [start, end] inklusif → tulis ke out_path."""
-    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
+def _http_range(url: str, start: int, end: int, out_path: str,
+                headers: dict | None = None, timeout: int = 60):
+    """GET satu byte-range [start, end] inklusif → tulis ke out_path.
+
+    `headers` = http_headers format dari yt-dlp (User-Agent, Accept,
+    Accept-Language, Sec-Fetch-Mode, dst). WAJIB sama dengan header yang
+    dipakai saat ekstraksi URL — googlevideo menolak request dengan
+    header/client lain (HTTP 403).
+    """
+    hdrs = dict(headers or {})
+    hdrs.setdefault("User-Agent", _UA_BROWSER)
+    # WAJIB: urllib tidak mengirim Accept-Encoding — GVS (googlevideo) menolak
+    # request tanpa header ini (403) karena tak menyisipkan bot. `identity`
+    # = tanpa kompresi → byte-range mentah.
+    hdrs.setdefault("Accept-Encoding", "identity")
+    hdrs["Range"] = f"bytes={start}-{end}"
+    req = urllib.request.Request(url, headers=hdrs)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = resp.read()
     with open(out_path, "wb") as f:
@@ -102,56 +222,127 @@ def _http_range(url: str, start: int, end: int, out_path: str, timeout: int = 60
     return len(data)
 
 
-def _get_format_url(url: str, itag: str) -> str:
-    """Ambil direct googlevideo URL untuk satu itag — cascade client.
+def _evict_url_cache(url: str, itag: str):
+    """Buang URL ter-cache (mis. kena 403) agar percobaan berikutnya
+    men-extract URL baru (tanda tangan / client segar)."""
+    _worker_url_cache().pop((url, itag), None)
 
-    Coba client utama (android_vr) dulu = perilaku lama untuk non-member,
-    TANPA cookies (android_vr tidak mendukung cookies; jika cookies ikut
-    di-pass, yt-dlp men-skip client ini dan format HD live VOD hilang).
-    Lalu client default (tanpa extractor-args — yt-dlp auto-pilih, mis. TVHTML5)
-    DENGAN cookies untuk konten members-only yang tidak diekspos android_vr.
-    Hanya jika gagal, coba client fallback (web/tv) dengan cookies.
-    URL di-cache per (url, itag) DI DALAM worker yang sama → tiap worker pakai
-    URL sendiri, dipakai ulang untuk klip-klip yang diproses worker itu.
+
+def _sigfuncs_cache_dir() -> str:
+    """Lokasi cache youtube-sigfuncs yt-dlp (Windows memakai ~/.cache/yt-dlp)."""
+    return os.path.join(os.path.expanduser("~"), ".cache", "yt-dlp", "youtube-sigfuncs")
+
+
+def _clear_sigfuncs_cache():
+    """Hapus cache sigfuncs yt-dlp.
+
+    Cache sigfuncs yang BASI membuat yt-dlp solve challenge `n` dengan hasil
+    SALAH → URL googlevideo ditolak GVS dengan HTTP 403 walau header request
+    sudah benar. Menghapus cache memaksa yt-dlp mengunduh player JS baru dan
+    solve ulang challenge → URL fresh langsung diterima (206).
+    """
+    import shutil
+    try:
+        d = _sigfuncs_cache_dir()
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+            print("   🧹 Cache sigfuncs yt-dlp dibersihkan (solve ulang challenge n)")
+    except Exception:
+        pass
+
+
+def _refresh_format_url(page_url: str, itag: str, attempt: int = 1) -> tuple[str, dict]:
+    """Evict URL ter-cache lalu extract URL baru dari client BERBEDA.
+
+    Gate jump-range GVS bersifat PER-SERVER dan bergiliran: client berbeda
+    (android_vr / tv_embedded / web_embedded) dapat server googlevideo
+    berbeda. Saat 403, refresh dari client yang sama hanya mendapat server
+    yang sama (tetap 403) — rotasi cascade per attempt lah yang menemukan
+    server yang bebas gate. attempt 2 juga membersihkan cache sigfuncs
+    (cache basi membuat solve challenge `n` salah → semua URL 403).
+    """
+    _evict_url_cache(page_url, itag)
+    if attempt >= 2:
+        _clear_sigfuncs_cache()
+    return _get_format_url(page_url, itag, rotate=attempt)
+
+
+def _get_format_url(url: str, itag: str, rotate: int = 0) -> tuple[str, dict]:
+    """Ambil (direct googlevideo URL, http_headers) untuk satu itag.
+
+    Ekstraksi memakai `-J` (dump JSON) — BUKAN `-g` — karena kita butuh
+    `http_headers` format (User-Agent Chrome versi spesifik, Accept,
+    Accept-Language, Sec-Fetch-Mode). Request byte-range ke googlevideo
+    hanya diterima bila header-nya persis sama dengan konteks client yang
+    menandatangani URL; header berbeda → HTTP 403.
+
+    `rotate` menggeser urutan cascade client — dipakai saat retry 403 untuk
+    mendapat URL dari server googlevideo yang BERBEDA (gate jump-range GVS
+    bersifat per-server, bergiliran antar client).
+
+    URL + headers di-cache per (url, itag) DI DALAM worker yang sama → tiap
+    worker pakai URL sendiri, dipakai ulang untuk klip-klip worker itu.
     """
     key = (url, itag)
     now = time.time()
     cache = _worker_url_cache()
     hit = cache.get(key)
     if hit and hit[0] > now:
-        return hit[1]
+        return hit[1], hit[2]
 
-    # android_vr (tanpa cookies) → default (dengan cookies) → web → tv.
-    # None = tanpa --extractor-args: yt-dlp memilih client default-nya sendiri.
-    # Video non-member cukup android_vr tanpa cookies. Video members-only:
-    # android_vr gagal → lanjut default/web/tv dengan cookies.
+    # Cascade client untuk extract URL direct googlevideo:
+    # - web_embedded + PO token (bgutil provider di Docker :4416): menembus
+    #   gate jump-range GVS (403) pada live VOD → prioritas PERTAMA.
+    # - android_vr / tv: fallback tanpa PO token.
+    # - web_embedded + cookies: members-only.
+    # Non-member selalu TANPA cookies — konten publik tidak butuh sesi login.
     clients = [
-        (_PLAYER_CLIENT, False),   # android_vr — tanpa cookies
+        (_PLAYER_CLIENT, False),   # web_embedded + PO token ✅ (anti-gate)
+        ("android_vr", False),     # live VOD HD — range-friendly (tanpa PO)
+        ("tv", False),             # live VOD — range-friendly (tanpa PO)
+        (_PLAYER_CLIENT, True),    # web_embedded + cookies — members-only
         (None, True),              # default — dengan cookies
         ("web", True),
         ("tv", True),
     ]
+    # Rotasi attempt: mulai cascade dari posisi ke-`rotate` (wrap-around).
+    if rotate % len(clients):
+        cut = rotate % len(clients)
+        clients = clients[cut:] + clients[:cut]
     last_err = None
-    for client, use_cookies in clients:
-        label = client if client else "default"
-        try:
-            cmd = yt_dlp_cmd(use_cookies=use_cookies)
-            if client:
-                cmd += ["--extractor-args", f"youtube:player_client={client}"]
-            cmd += ["-f", itag, "-g", url]
-            out = subprocess.check_output(cmd, text=True, timeout=90)
-            for line in out.splitlines():
-                line = line.strip()
-                if line.startswith("http"):
+    with _EXTRACT_LOCK:
+        for client, use_cookies in clients:
+            label = client if client else "default"
+            try:
+                cmd = yt_dlp_cmd(use_cookies=use_cookies)
+                if client:
+                    # Client web-family + fetch_pot=always: URL googlevideo
+                    # membawa PO token (dari provider bgutil :4416) →
+                    # range-request lompat jauh diterima (206), menembus
+                    # gate jump-range GVS yang membalas 403.
+                    if client in ("web_embedded", "web", "tv"):
+                        cmd += ["--extractor-args",
+                                f"youtube:player_client={client};fetch_pot=always"]
+                    else:
+                        cmd += ["--extractor-args", f"youtube:player_client={client}"]
+                cmd += ["-f", _AUDIO_SELECTOR if itag == AUDIO_FORMAT else itag,
+                        "-J", url]
+                # Output JSON bisa berisi unicode → pastikan pipe UTF-8.
+                env = dict(os.environ, PYTHONIOENCODING="utf-8")
+                out = subprocess.check_output(cmd, timeout=180, env=env)
+                info = json.loads(out)
+                direct = info.get("url") or ""
+                headers = dict(info.get("http_headers") or {})
+                if direct.startswith("http"):
                     if client != _PLAYER_CLIENT:
                         print(f"   🎮 itag {itag} via client '{label}' (fallback)")
-                    cache[key] = (_url_expire_ts(line), line)
-                    return line
-        except Exception as e:
-            last_err = e
-            print(f"   [client] itag {itag} via '{label}' gagal: {str(e)[:60]}")
-            throttle_pause(f"client {label}")
-            continue
+                    cache[key] = (_url_expire_ts(direct), direct, headers)
+                    return direct, headers
+            except Exception as e:
+                last_err = e
+                print(f"   [client] itag {itag} via '{label}' gagal: {str(e)[:60]}")
+                throttle_pause(f"client {label}")
+                continue
     raise RuntimeError(f"URL kosong untuk itag {itag} ({str(last_err)[:60]})")
 
 
@@ -248,21 +439,30 @@ def _window_for_range(frags, start_sec: float, end_sec: float):
     return byte_start, byte_end, frags[i0][2]
 
 
-def _fetch_header_and_parse(url: str, token: str):
+def _fetch_header_and_parse(url: str, headers: dict, token: str):
     """Ambil header (init+sidx) secara progresif lalu parse. Return
     (init_len, frags) atau None. HTTP 403 (throttle) di-propagate agar caller
-    bisa membedakan throttle dari kegagalan biasa."""
+    bisa membedakan throttle dari kegagalan biasa. Hasil di-cache per URL
+    (sidx tidak berubah untuk satu URL)."""
+    mcache = _worker_media_cache()
+    hit = mcache.get(url)
+    if hit:
+        # hit = (parsed, init_bytes); parsed = (init_len, frags).
+        return hit[0]
     for probe_size in (512 * 1024, 2 * 1024 * 1024, 8 * 1024 * 1024):
         tmp = os.path.join(TMP_DIR, f"hdr_probe_{token}.bin")
         try:
-            _http_range(url, 0, probe_size - 1, tmp)
+            _http_range(url, 0, probe_size - 1, tmp, headers=headers)
             with open(tmp, "rb") as f:
                 data = f.read()
             parsed = _parse_sidx(data)
             if parsed:
+                # init segment (ftyp+moov) sudah termasuk dalam buffer probe.
+                mcache[url] = (parsed, data[:parsed[0]])
                 return parsed
         except Exception as e:
             if "403" in str(e):
+                print("   ⚠️ 403 saat ambil header init/sidx (range 0..512KB)...")
                 raise
             pass
         finally:
@@ -271,11 +471,13 @@ def _fetch_header_and_parse(url: str, token: str):
     return None
 
 
-def _download_stream_slice(url: str, init_len: int, frags,
+def _download_stream_slice(url: str, headers: dict, init_len: int, frags,
                            start_sec: float, end_sec: float,
                            tag: str, token: str) -> tuple[str, float]:
     """
     Unduh init + window byte untuk satu stream (video/audio) → file .mp4 valid.
+    Init segment diambil dari cache worker (sekali per URL) — hanya window
+    moof+mdat yang di-fetch per klip → 1 request per stream per klip.
     Return (path, frag_start_time). Raise jika di luar jangkauan.
     """
     win = _window_for_range(frags, start_sec, end_sec)
@@ -283,21 +485,43 @@ def _download_stream_slice(url: str, init_len: int, frags,
         raise RuntimeError(f"[{tag}] range {start_sec}-{end_sec} di luar durasi")
     byte_start, byte_end, frag_t = win
 
-    init_path = os.path.join(TMP_DIR, f"hd_{tag}_init_{token}.bin")
+    mcache = _worker_media_cache()
+    entry = mcache.get(url)
+    if entry and entry[1]:
+        init_bytes = entry[1]
+    else:
+        init_path = os.path.join(TMP_DIR, f"hd_{tag}_init_{token}.bin")
+        _http_range(url, 0, init_len - 1, init_path, headers=headers)
+        with open(init_path, "rb") as f:
+            init_bytes = f.read()
+        if os.path.exists(init_path):
+            os.remove(init_path)
+        mcache[url] = ((init_len, frags), init_bytes)
+
     win_path = os.path.join(TMP_DIR, f"hd_{tag}_win_{token}.bin")
     slice_path = os.path.join(TMP_DIR, f"hd_{tag}_slice_{token}.mp4")
 
-    _http_range(url, 0, init_len - 1, init_path)          # ftyp+moov
-    _http_range(url, byte_start, byte_end, win_path)      # moof+mdat window
+    try:
+        _http_range(url, byte_start, byte_end, win_path, headers=headers)  # moof+mdat window
+    except Exception as e:
+        if "403" in str(e):
+            print(f"   ⚠️ 403 saat ambil window (jump ke byte {byte_start/1024/1024:.0f}MB) — "
+                  f"gate jump-range GVS")
+        raise
 
     with open(slice_path, "wb") as out:
-        for p in (init_path, win_path):
-            with open(p, "rb") as f:
-                out.write(f.read())
-    for p in (init_path, win_path):
-        if os.path.exists(p):
-            os.remove(p)
+        out.write(init_bytes)
+        with open(win_path, "rb") as f:
+            out.write(f.read())
+    if os.path.exists(win_path):
+        os.remove(win_path)
     return slice_path, frag_t
+
+
+def _page_video_id(page_url: str) -> str:
+    """Ambil video ID (11 char) dari URL halaman YouTube apa pun."""
+    m = re.search(r"(?:v=|/live/|/shorts/|youtu\.be/)([A-Za-z0-9_-]{11})", page_url)
+    return m.group(1) if m else page_url
 
 
 def download_section_hd(url: str, start_sec: float, end_sec: float,
@@ -312,39 +536,125 @@ def download_section_hd(url: str, start_sec: float, end_sec: float,
 
     # token unik per-panggilan → temp tidak tabrakan saat 3 worker paralel
     token = hashlib.md5(f"{output_path}:{start_sec}".encode()).hexdigest()[:10]
+    video_id = _page_video_id(url)
+
+    video_slice = video_frag_t = None
+    chosen = None
+
+    # ── STEP 0: URL ungated dari disk cache (hasil mint "jackpot" sebelumnya) ──
+    # Gate jump-range GVS roulette per-mint: URL yang pernah terbukti bisa jump
+    # (206) dipakai ulang sampai expired (~6 jam) — tidak perlu mint ulang.
+    cached_v = _disk_cache_get(video_id, HD_VIDEO_FORMATS[0][0])
+    if cached_v:
+        cv_url, cv_hdrs = cached_v
+        try:
+            cv_hdr = _retry_on_403(
+                lambda: _fetch_header_and_parse(cv_url, cv_hdrs, token),
+                label="disk cache header",
+            )
+            if cv_hdr:
+                cv_init, cv_frags = cv_hdr
+                video_slice, video_frag_t = _download_stream_slice(
+                    cv_url, cv_hdrs, cv_init, cv_frags, start_sec, end_sec, "v", token
+                )
+                chosen = f"{HD_VIDEO_FORMATS[0][1]} (disk cache)"
+                print(f"   🎯 HD byte-range: {chosen}")
+        except Exception as e:
+            print(f"   ⚠️ disk cache URL basi/gagal ({str(e)[:50]}) — mint baru...")
 
     # ── STEP 1: pilih format video HD dari cascade ──
-    audio_url = _get_format_url(url, AUDIO_FORMAT)
-    audio_hdr = _fetch_header_and_parse(audio_url, token)
+    # Gate jump-range GVS untuk live VOD bersifat roulette per-mint & waktu:
+    # kadang longgar (jump 206 OK), sering ketat (403 untuk SEMUA client).
+    # Strategi: beberapa rotasi client per itag; jika itag pertama kena gate
+    # (403), jangan habiskan waktu dengan itag lain (gate-nya per-KONTEN,
+    # bukan per-format) → langsung gagal agar pipeline segera fallback ke
+    # full download 720p yang andal.
+    # ── STEP 1: siapkan URL AUDIO (disk cache dulu, lalu extract baru) ──
+    # NOTE: audio WAJIB di-resolve walau video sudah dari disk cache —
+    # slice audio tetap dibutuhkan tiap klip.
+    cached_a = _disk_cache_get(video_id, AUDIO_FORMAT)
+    if cached_a:
+        audio_url, audio_hdrs = cached_a
+        print("   💾 Audio URL dari disk cache (ungated)")
+    else:
+        audio_url, audio_hdrs = _get_format_url(url, AUDIO_FORMAT)
+    audio_hdr = None
+    for attempt in (1, 2):
+        try:
+            audio_hdr = _retry_on_403(
+                lambda: _fetch_header_and_parse(audio_url, audio_hdrs, token),
+                label="audio header",
+            )
+            break
+        except Exception as e:
+            if "403" not in str(e) or attempt == 2:
+                raise
+            print("   ⚠️ audio 403 (URL sama sudah 3x) — rotasi client...")
+            throttle_pause("audio 403", seconds=3.0)
+            audio_url, audio_hdrs = _refresh_format_url(url, AUDIO_FORMAT, attempt)
+    if not audio_hdr:
+        # sidx tak terbaca (mis. URL cache basi) → mint URL baru sekali
+        print("   ⚠️ audio sidx tak terbaca — mint URL baru...")
+        audio_url, audio_hdrs = _refresh_format_url(url, AUDIO_FORMAT, 1)
+        audio_hdr = _fetch_header_and_parse(audio_url, audio_hdrs, token)
     if not audio_hdr:
         raise RuntimeError("audio: sidx tak terbaca")
 
     seen_403 = False
-    video_slice = video_frag_t = None
-    chosen = None
-    for itag, label in HD_VIDEO_FORMATS:
-        try:
-            vurl = _get_format_url(url, itag)
-            vhdr = _fetch_header_and_parse(vurl, token)
-            if not vhdr:
-                continue
-            v_init, v_frags = vhdr
-            video_slice, video_frag_t = _download_stream_slice(
-                vurl, v_init, v_frags, start_sec, end_sec, "v", token
-            )
-            chosen = label
-            print(f"   🎯 HD byte-range: {label} (itag {itag})")
-            break
-        except Exception as e:
-            if "403" in str(e):
-                seen_403 = True
-                # 403 pada byte-range = gate media per-video/IP (YouTube menolak
-                # lompat range jauh). Format lain dari IP yang sama pasti 403 juga
-                # → fail-fast, biarkan pipeline langsung ke fallback full download.
-                raise _HDThrottleError("byte-range 403 — skip cascade") from e
-            print(f"   ⚠️ itag {itag} gagal: {str(e)[:60]}")
-            throttle_pause(f"itag {itag}")
-            continue
+    if not video_slice:
+        for itag, label in HD_VIDEO_FORMATS:
+            # Itag prioritas dapat rotasi client lebih banyak — gate jump-range
+            # GVS bersifat roulette PER-MINT: client berbeda dapat server
+            # googlevideo berbeda, salah satunya bisa bebas gate.
+            max_attempts = 4 if itag == HD_VIDEO_FORMATS[0][0] else 2
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    vurl, vhdrs = _get_format_url(url, itag, rotate=attempt - 1)
+                    vhdr = _retry_on_403(
+                        lambda: _fetch_header_and_parse(vurl, vhdrs, token),
+                        label=f"itag {itag} header",
+                    )
+                    if not vhdr:
+                        break  # sidx tak terbaca → lanjut itag berikutnya
+                    v_init, v_frags = vhdr
+                    video_slice, video_frag_t = _retry_on_403(
+                        lambda: _download_stream_slice(
+                            vurl, vhdrs, v_init, v_frags,
+                            start_sec, end_sec, "v", token
+                        ),
+                        label=f"itag {itag} window",
+                    )
+                    chosen = label
+                    print(f"   🎯 HD byte-range: {label} (itag {itag})")
+                    # URL ini TERBUKTI bisa jump → simpan untuk klip/run berikutnya
+                    _disk_cache_put(video_id, itag, vurl, vhdrs)
+                    break
+                except Exception as e:
+                    if "403" in str(e) and attempt < max_attempts:
+                        print(f"   ⚠️ itag {itag} kena 403 (attempt {attempt}) — rotasi client...")
+                        _evict_url_cache(url, itag)
+                        if attempt >= 2:
+                            # cache sigfuncs basi membuat URL hasil rotasi tetap
+                            # salah tanda tangan → 403 lagi walau client benar.
+                            _clear_sigfuncs_cache()
+                        throttle_pause(f"itag {itag} 403", seconds=3.0)
+                        continue
+                    if "403" in str(e):
+                        if itag == HD_VIDEO_FORMATS[0][0]:
+                            # semua rotasi client untuk itag prioritas kena gate →
+                            # konten ini sedang di-gate menyeluruh, itag lain pun
+                            # pasti sama → fail-fast ke fallback.
+                            print("   ⚠️ gate jump-range aktif untuk konten ini — fail-fast ke fallback")
+                            raise _HDThrottleError("jump-range gated (403)")
+                        seen_403 = True
+                        break
+                    print(f"   ⚠️ itag {itag} gagal: {str(e)[:60]}")
+                    throttle_pause(f"itag {itag}")
+                    break
+                if video_slice:
+                    break
+            if video_slice:
+                break
 
     if not video_slice:
         if seen_403:
@@ -352,15 +662,37 @@ def download_section_hd(url: str, start_sec: float, end_sec: float,
         raise RuntimeError("semua format HD gagal")
 
     # ── STEP 2: unduh slice audio ──
+    # Jika 403: satu rotasi client, parse ulang header, retry — lalu gagal.
     a_init, a_frags = audio_hdr
-    try:
-        audio_slice, audio_frag_t = _download_stream_slice(
-            audio_url, a_init, a_frags, start_sec, end_sec, "a", token
-        )
-    except Exception as e:
-        if "403" in str(e):
-            raise _HDThrottleError(str(e)) from e
-        raise
+    audio_slice = None
+    audio_frag_t = None
+    for attempt in (1, 2):
+        try:
+            audio_slice, audio_frag_t = _retry_on_403(
+                lambda: _download_stream_slice(
+                    audio_url, audio_hdrs, a_init, a_frags,
+                    start_sec, end_sec, "a", token
+                ),
+                label="audio window",
+            )
+            # Audio URL terbukti bisa jump → simpan ke disk cache juga
+            _disk_cache_put(video_id, AUDIO_FORMAT, audio_url, audio_hdrs)
+            break
+        except Exception as e:
+            if "403" not in str(e) or attempt == 2:
+                if "403" in str(e):
+                    raise _HDThrottleError(str(e)) from e
+                raise
+            print("   ⚠️ audio slice 403 (URL sama sudah 3x) — rotasi client...")
+            throttle_pause("audio slice 403", seconds=3.0)
+            audio_url, audio_hdrs = _refresh_format_url(url, AUDIO_FORMAT, attempt)
+            audio_hdr = _retry_on_403(
+                lambda: _fetch_header_and_parse(audio_url, audio_hdrs, token),
+                label="audio header (retry)",
+            )
+            if not audio_hdr:
+                raise RuntimeError("audio: sidx tak terbaca (retry)")
+            a_init, a_frags = audio_hdr
 
     # ── STEP 3: potong TIAP stream terpisah dengan offset-nya sendiri ──
     # PENTING: window video & audio mulai di batas fragmen yang BERBEDA

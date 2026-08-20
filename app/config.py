@@ -22,6 +22,17 @@ TRANSISI_SOUND = os.path.join(ASSETS_DIR, "sounds", "transisi_sound.mpeg")
 WATERMARK_PATH = os.path.join(ASSETS_DIR, "images", "watermark.png")
 
 # ─────────────────────────────────────────
+# FULL VIDEO CACHE CLEANUP — kontrol pemakaian disk
+# ─────────────────────────────────────────
+# Cache full_{id}.mp4 (1-3GB per video live) tidak pernah dibersihkan oleh
+# pipeline. Kebijakan cleanup berjalan saat pipeline gaming dimulai:
+#   1. Hapus cache yang berumur > FULL_CACHE_MAX_AGE_HOURS (default 24 jam).
+#   2. Jika total ukuran cache masih > FULL_CACHE_MAX_TOTAL_GB (default 20GB),
+#      hapus yang tertua dulu sampai masuk batas.
+FULL_CACHE_MAX_AGE_HOURS = 24
+FULL_CACHE_MAX_TOTAL_GB = 20.0
+
+# ─────────────────────────────────────────
 # WHISPER (lazy load — hanya init sekali)
 # ─────────────────────────────────────────
 _whisper_model = None
