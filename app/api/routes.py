@@ -109,7 +109,9 @@ async def cut_video_batch(request: BatchClipRequest):
 @router.post("/cut-gaming-compilation")
 async def cut_gaming_compilation(request: GamingCompilationRequest):
     """
-    Endpoint kompilasi gaming: N klip → 1 video dengan transisi.
+    Endpoint kompilasi gaming GAMING5: N klip → 1 video dengan transisi.
+    Layout: facecam 40% atas (1080×768) + gameplay 60% bawah (1080×1152),
+    watermark 150px di tengah hasil akhir jika assets/images/watermark.png ada.
     Request body:
     {
       "url": "https://youtube.com/watch?v=xxx",

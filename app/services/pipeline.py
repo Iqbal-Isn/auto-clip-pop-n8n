@@ -338,11 +338,8 @@ def _process_single_clip_full(url: str, start_str: str, end_str: str,
         _download_section(url, start_sec, end_sec, tmp_yt)
         source_h264 = tmp_yt
 
-        # Step 2: Whisper subtitle (skip untuk mode gaming)
-        if mode.lower() != "gaming":
-            srt_file = _whisper_subtitle(source_h264, prefix)
-        else:
-            print(f"🎮 Mode GAMING — skip Whisper subtitle")
+        # Step 2: Whisper subtitle (mode gaming lama sudah dihapus)
+        srt_file = _whisper_subtitle(source_h264, prefix)
 
         # Step 3: TikTok filter
         tmp_merged = apply_tiktok_filter(source_h264, srt_file, mode, prefix)
@@ -373,6 +370,15 @@ def _cut_video_impl(url: str, segments: list[dict], mode: str = "normal") -> lis
     """
     if not segments:
         return []
+
+    if mode.lower() != "normal":
+        msg = ("Mode GAMING sudah dihapus. Gunakan mode normal atau "
+               "keyword GAMING5 untuk kompilasi gaming.")
+        print(f"MODE DITOLAK: {msg}")
+        return [{
+            "status": "error", "file": None, "size_mb": 0,
+            "mode": mode, "error": msg
+        } for _ in segments]
 
     # Fail-fast: pastikan sesi cookies member masih valid sebelum kerja berat.
     try:
@@ -435,8 +441,9 @@ def process_gaming_compilation(url: str, clips: list[dict],
     """
     Proses N klip gaming:
     1. Parallel --download-sections (2 workers, CEPAT — kurangi burst agar tak kena 403)
-    2. Whisper SKIP — mode gaming tanpa auto subtitle
+    2. Whisper SKIP — mode gaming compilation tanpa auto subtitle
     3. Parallel gaming filter + encode (3 workers)
+       Layout GAMING5: facecam 40% atas (1080×768) + gameplay 60% bawah (1080×1152)
     4. Concat dengan xfade transitions → 1 video final
     """
     n = len(clips)

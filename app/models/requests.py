@@ -7,13 +7,13 @@ class ClipRequest(BaseModel):
     url: str
     start: str
     end: str
-    mode: str = "normal"  # "normal" atau "gaming"
+    mode: str = "normal"  # hanya "normal"; mode GAMING lama sudah dihapus
 
 
 class BatchClipRequest(BaseModel):
     url: str
     clips: list[dict]  # [{"start": "HH:MM:SS", "end": "HH:MM:SS"}, ...]
-    mode: str = "normal"
+    mode: str = "normal"  # hanya "normal"; mode GAMING lama sudah dihapus
 
 
 class GamingCompilationRequest(BaseModel):

@@ -214,20 +214,19 @@ python run.py
 ## 📝 Format Telegram Command
 
 ```
-<URL YouTube> [opsional: HH:MM:SS-HH:MM:SS] [opsional: GAMING] [opsional: GAMING5] [opsional: posisi facecam]
+<URL YouTube> [opsional: HH:MM:SS-HH:MM:SS] [opsional: GAMING5] [opsional: posisi facecam]
 
 Contoh:
 https://youtube.com/watch?v=xxx
 https://youtube.com/watch?v=xxx 00:05:00-00:10:00
-https://youtube.com/watch?v=xxx GAMING
+https://youtube.com/watch?v=xxx GAMING5
 https://youtube.com/watch?v=xxx GAMING5 btmright
 ```
 
 | Keyword | Efek |
 |---------|------|
 | (tanpa keyword) | Mode normal, AI pilih 3 momen terbaik |
-| `GAMING` | Mode gaming, AI pilih 3 momen terbaik, layout facecam |
-| `GAMING5` | Mode gaming kompilasi, AI pilih 5 klimaks → 1 video |
+| `GAMING5` | Mode gaming kompilasi, AI pilih 5 klimaks → 1 video. Layout: facecam 40% atas + gameplay 60% bawah |
 | Range waktu | Filter transkrip dalam rentang tertentu |
 
 ## 🔧 Konfigurasi
@@ -248,13 +247,20 @@ Edit `app/config.py` untuk menyesuaikan:
 - Auto-deteksi wajah terbesar di 8 region facecam
 - Majority voting dari 5 sample frame (min. 2 frame)
 - Fallback ke posisi manual jika tidak terdeteksi
-- Crop persegi centered pada wajah, clamp dalam region
+- Crop centered pada wajah, clamp dalam region; untuk GAMING5 crop mengikuti rasio area facecam 1080×768
 
 ### Whisper Subtitle
 - faster-whisper `small` di CPU (int8)
 - Word-level timestamps untuk karaoke akurat
 - Grup kata per baris (max 2 kata, jeda >0.7s = baris baru)
 - Subtitle ASS dengan highlight kata aktif (`\K` tag)
+
+### Layout Kompilasi GAMING5
+- Output portrait 1080×1920 per klip
+- Facecam 40% bagian atas: 1080×768, memakai auto deteksi wajah YuNet dengan region crop diperluas 1.35× per dimensi
+- Gameplay 60% bagian bawah: 1080×1152
+- Watermark 150px di tengah hasil akhir jika `assets/images/watermark.png` tersedia
+- Whisper/auto subtitle dilewati untuk mode ini
 
 ### Transisi Kompilasi Gaming
 - Layar hitam + sound effect antar klip

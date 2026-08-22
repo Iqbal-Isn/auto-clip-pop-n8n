@@ -9,7 +9,10 @@
       },
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
-      "position": [10960, 7184],
+      "position": [
+        10960,
+        7184
+      ],
       "id": "4dc1841f-4f82-40f7-a512-82eb996589b9",
       "name": "Respond to Webhook"
     },
@@ -21,7 +24,10 @@
       },
       "type": "@n8n/n8n-nodes-langchain.agent",
       "typeVersion": 3.1,
-      "position": [9488, 6944],
+      "position": [
+        9488,
+        6944
+      ],
       "id": "2ce1dc8d-7592-469d-8cda-9d090af04dcb",
       "name": "AI Agent"
     },
@@ -38,7 +44,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [10736, 6944],
+      "position": [
+        10736,
+        6944
+      ],
       "id": "f2b68379-8e76-4fef-b422-103b4f7598dc",
       "name": "HTTP Request",
       "continueOnFail": true
@@ -50,7 +59,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
-      "position": [9264, 6944],
+      "position": [
+        9264,
+        6944
+      ],
       "id": "f4b9ef80-3a56-4fe7-949c-21cd4653e02f",
       "name": "HTTP Request1"
     },
@@ -63,7 +75,10 @@
       },
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [10064, 7184],
+      "position": [
+        10064,
+        7184
+      ],
       "id": "ee92ba18-94aa-4738-9323-950c7cccdff0",
       "name": "Send a document",
       "webhookId": "a9342e2f-af75-4360-b492-a69ed268812c",
@@ -83,7 +98,10 @@
       },
       "type": "n8n-nodes-base.readWriteFile",
       "typeVersion": 1.1,
-      "position": [9824, 7184],
+      "position": [
+        9824,
+        7184
+      ],
       "id": "f02d185b-9d8b-4dce-a04c-4d3b6f87c58f",
       "name": "Read/Write Files from Disk",
       "retryOnFail": true,
@@ -91,12 +109,17 @@
     },
     {
       "parameters": {
-        "updates": ["message"],
+        "updates": [
+          "message"
+        ],
         "additionalFields": {}
       },
       "type": "n8n-nodes-base.telegramTrigger",
       "typeVersion": 1.2,
-      "position": [8368, 6832],
+      "position": [
+        8368,
+        6832
+      ],
       "id": "8f049541-528e-44b7-b8f0-c8f010b0a200",
       "name": "Telegram Trigger",
       "webhookId": "a5966c25-8a73-4a6b-999c-3ff20f75f335",
@@ -115,7 +138,10 @@
       },
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [8816, 6736],
+      "position": [
+        8816,
+        6736
+      ],
       "id": "0a25b95b-ee38-4e2d-ab73-2fd797b21cd2",
       "name": "Send a text message",
       "webhookId": "a326a4c4-7d58-4056-85f5-40156333c9be",
@@ -161,7 +187,10 @@
       },
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
-      "position": [8592, 6832],
+      "position": [
+        8592,
+        6832
+      ],
       "id": "965bbb02-fb91-4075-b645-1aebdd5e850c",
       "name": "If"
     },
@@ -173,7 +202,10 @@
       },
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [8816, 6928],
+      "position": [
+        8816,
+        6928
+      ],
       "id": "967e5f7b-85c5-4c67-91ff-36e6e5b34a45",
       "name": "Send a text message1",
       "webhookId": "a326a4c4-7d58-4056-85f5-40156333c9be",
@@ -186,11 +218,14 @@
     },
     {
       "parameters": {
-        "jsCode": "// Parse output dari AI Agent\nconst raw = $('AI Agent').item.json.output;\n\nlet moments;\ntry {\n  const match = raw.match(/\\[[\\s\\S]*\\]/);\n  if (!match) throw new Error('Format JSON tidak ditemukan dalam output AI');\n  moments = JSON.parse(match[0]);\n} catch (err) {\n  throw new Error('⚠️ AI gagal menghasilkan output yang valid. Error: ' + err.message);\n}\n\nconst original_text = $('Telegram Trigger').item.json.message.text.trim();\nconst parts = original_text.split(' ');\nconst yt_url = parts[0];\nconst range = parts[1] && parts[1].includes('-') ? parts[1] : null;\nconst isGaming = original_text.toUpperCase().includes('GAMING');\nconst mode = isGaming ? \"gaming\" : \"normal\";\nconst chatId = $('Telegram Trigger').item.json.message.chat.id;\n\n// Build notifikasi ke user\nlet msg = `🎬 *3 Momen Terbaik Ditemukan!*\\n`;\nmsg += `Mode: ${isGaming ? '🎮 Gaming (Facecam)' : '📺 Normal'}\\n`;\nmsg += range ? `⏰ Range: ${range}\\n\\n` : '\\n';\n\n  const safeTruncate = (str, maxLen) => {\n    if (!str) return '';\n    const chars = Array.from(str);\n    return chars.length > maxLen ? chars.slice(0, maxLen).join('') + '...' : str;\n  };\n\n  moments.forEach((m, i) => {\n    msg += `*${i + 1}.* ⏱ ${m.start} - ${m.end} | ${m.tipe}\\n`;\n    msg += `📝 ${safeTruncate(m.alasan, 100)}\\n`;           // aman + limit\n    msg += `🏷️ ${safeTruncate(m.caption, 70)}\\n\\n`;        // aman\n  });\n\nmsg += `⏳ Memulai pemotongan *${moments.length} klip* secara otomatis...`;\nmsg += `\\n📹 Klip akan dikirim satu per satu.`;\n\nreturn [{\n  json: {\n    chatId: chatId,\n    text: msg\n  }\n}];"
+        "jsCode": "// Parse output dari AI Agent\nconst raw = $('AI Agent').item.json.output;\n\nlet moments;\ntry {\n  const match = raw.match(/\\[[\\s\\S]*\\]/);\n  if (!match) throw new Error('Format JSON tidak ditemukan dalam output AI');\n  moments = JSON.parse(match[0]);\n} catch (err) {\n  throw new Error('⚠️ AI gagal menghasilkan output yang valid. Error: ' + err.message);\n}\n\nconst original_text = $('Telegram Trigger').item.json.message.text.trim();\nconst parts = original_text.split(' ');\nconst yt_url = parts[0];\nconst range = parts[1] && parts[1].includes('-') ? parts[1] : null;\nconst mode = \"normal\";\nconst chatId = $('Telegram Trigger').item.json.message.chat.id;\n\n// Build notifikasi ke user\nlet msg = `🎬 *3 Momen Terbaik Ditemukan!*\\n`;\nmsg += `Mode: 📺 Normal\\n`;\nmsg += range ? `⏰ Range: ${range}\\n\\n` : '\\n';\n\n  const safeTruncate = (str, maxLen) => {\n    if (!str) return '';\n    const chars = Array.from(str);\n    return chars.length > maxLen ? chars.slice(0, maxLen).join('') + '...' : str;\n  };\n\n  moments.forEach((m, i) => {\n    msg += `*${i + 1}.* ⏱ ${m.start} - ${m.end} | ${m.tipe}\\n`;\n    msg += `📝 ${safeTruncate(m.alasan, 100)}\\n`;           // aman + limit\n    msg += `🏷️ ${safeTruncate(m.caption, 70)}\\n\\n`;        // aman\n  });\n\nmsg += `⏳ Memulai pemotongan *${moments.length} klip* secara otomatis...`;\nmsg += `\\n📹 Klip akan dikirim satu per satu.`;\n\nreturn [{\n  json: {\n    chatId: chatId,\n    text: msg\n  }\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [9840, 6944],
+      "position": [
+        9840,
+        6944
+      ],
       "id": "e17ff72f-9c06-4a05-ae4b-89b12d358e8f",
       "name": "Parse AI & Notify"
     },
@@ -202,7 +237,10 @@
       },
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [10064, 6944],
+      "position": [
+        10064,
+        6944
+      ],
       "id": "258fd86a-6f2e-400f-bc1c-f126aee20445",
       "name": "Send text (Notify)",
       "webhookId": "f1e2d3c4-b5a6-7890-cdef-1234567890ab",
@@ -215,11 +253,14 @@
     },
     {
       "parameters": {
-        "jsCode": "// Parse output dari AI Agent (independen dari Parse AI & Notify)\nconst raw = $('AI Agent').item.json.output;\n\nlet moments;\ntry {\n  const match = raw.match(/\\[[\\s\\S]*\\]/);\n  if (!match) throw new Error('Format JSON tidak ditemukan dalam output AI');\n  moments = JSON.parse(match[0]);\n} catch (err) {\n  throw new Error('⚠️ AI gagal menghasilkan output yang valid. Error: ' + err.message);\n}\n\nconst original_text = $('Telegram Trigger').item.json.message.text.trim();\nconst parts = original_text.split(' ');\nconst yt_url = parts[0];\nconst range = parts[1] && parts[1].includes('-') ? parts[1] : null;\nconst isGaming = original_text.toUpperCase().includes('GAMING');\nconst mode = isGaming ? \"gaming\" : \"normal\";\nconst chatId = $('Telegram Trigger').item.json.message.chat.id;\n\n// Split menjadi 3 item — satu per klip\nreturn moments.map((m, i) => ({\n  json: {\n    url: yt_url,\n    start: m.start,\n    end: m.end,\n    caption: m.caption,\n    mode: mode,\n    nomor: m.nomor,\n    score: m.score,\n    tipe: m.tipe,\n    alasan: m.alasan,\n    total: moments.length,\n    chatId: chatId,\n    index: i\n  }\n}));"
+        "jsCode": "// Parse output dari AI Agent (independen dari Parse AI & Notify)\nconst raw = $('AI Agent').item.json.output;\n\nlet moments;\ntry {\n  const match = raw.match(/\\[[\\s\\S]*\\]/);\n  if (!match) throw new Error('Format JSON tidak ditemukan dalam output AI');\n  moments = JSON.parse(match[0]);\n} catch (err) {\n  throw new Error('⚠️ AI gagal menghasilkan output yang valid. Error: ' + err.message);\n}\n\nconst original_text = $('Telegram Trigger').item.json.message.text.trim();\nconst parts = original_text.split(' ');\nconst yt_url = parts[0];\nconst range = parts[1] && parts[1].includes('-') ? parts[1] : null;\nconst mode = \"normal\";\nconst chatId = $('Telegram Trigger').item.json.message.chat.id;\n\n// Split menjadi 3 item — satu per klip\nreturn moments.map((m, i) => ({\n  json: {\n    url: yt_url,\n    start: m.start,\n    end: m.end,\n    caption: m.caption,\n    mode: mode,\n    nomor: m.nomor,\n    score: m.score,\n    tipe: m.tipe,\n    alasan: m.alasan,\n    total: moments.length,\n    chatId: chatId,\n    index: i\n  }\n}));"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [10288, 6944],
+      "position": [
+        10288,
+        6944
+      ],
       "id": "36719388-0fdd-438d-ad0e-30d87a4d09db",
       "name": "Split to 3 Clips"
     },
@@ -229,7 +270,10 @@
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [10512, 6944],
+      "position": [
+        10512,
+        6944
+      ],
       "id": "6b000b80-030e-4e3a-8f0c-accd8a0dee20",
       "name": "Aggregate for Batch"
     },
@@ -239,7 +283,10 @@
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [10960, 6944],
+      "position": [
+        10960,
+        6944
+      ],
       "id": "812fd0fd-8d1e-4992-a753-5121c713af81",
       "name": "Split Batch Result"
     },
@@ -249,7 +296,10 @@
       },
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
-      "position": [10288, 7184],
+      "position": [
+        10288,
+        7184
+      ],
       "id": "226fb5a9-0bb8-4da2-a37d-b02c55474602",
       "name": "Wait",
       "webhookId": "c5d6e7f8-a9b0-1234-defg-hijkl5678901",
@@ -261,7 +311,10 @@
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [10512, 7184],
+      "position": [
+        10512,
+        7184
+      ],
       "id": "5b73b97f-23fa-467e-9766-6af88dc3ab6b",
       "name": "Code (Summary)"
     },
@@ -273,7 +326,10 @@
       },
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [10720, 7184],
+      "position": [
+        10720,
+        7184
+      ],
       "id": "bd803f12-195a-40b1-aced-8799abdb8e3a",
       "name": "Send text (Final)",
       "webhookId": "d6e7f8a9-b0c1-2345-efgh-ijklm6789012",
@@ -296,7 +352,10 @@
       },
       "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
       "typeVersion": 1.5,
-      "position": [9648, 6720],
+      "position": [
+        9648,
+        6720
+      ],
       "id": "f70a25d6-a99c-47c4-84f9-152e0214d29e",
       "name": "Anthropic Chat Model",
       "credentials": {
@@ -361,7 +420,10 @@
       "name": "Switch GAMING5",
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3,
-      "position": [9040, 6736],
+      "position": [
+        9040,
+        6736
+      ],
       "id": "bf9c0c63-f2fb-4787-8404-e9db53cb595a"
     },
     {
@@ -385,7 +447,10 @@
       "name": "HTTP G5 Transcript",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [9264, 6544],
+      "position": [
+        9264,
+        6544
+      ],
       "id": "3f979ed1-97d7-4ce3-9985-56c1445af1ed"
     },
     {
@@ -397,7 +462,10 @@
       "name": "AI Agent GAMING5",
       "type": "@n8n/n8n-nodes-langchain.agent",
       "typeVersion": 3.1,
-      "position": [9488, 6432],
+      "position": [
+        9488,
+        6432
+      ],
       "id": "a1665133-fefb-4a58-8502-1d3b7b29e88f"
     },
     {
@@ -407,7 +475,10 @@
       "name": "Parse GAMING5",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [9840, 6544],
+      "position": [
+        9840,
+        6544
+      ],
       "id": "e036426a-ffc6-4a25-845c-50821046d85f"
     },
     {
@@ -419,7 +490,10 @@
       "name": "Send text GAMING5",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [10064, 6544],
+      "position": [
+        10064,
+        6544
+      ],
       "id": "67c12b05-6462-465f-a51a-2191ffd6cf92",
       "webhookId": "64577ffd-0d44-46f6-a4ac-7d674a057ae0",
       "credentials": {
@@ -457,7 +531,10 @@
       "name": "HTTP G5 Cut",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [10288, 6544],
+      "position": [
+        10288,
+        6544
+      ],
       "id": "a7b823a9-a106-4543-8278-c008ca6dd17f"
     },
     {
@@ -468,7 +545,10 @@
       "name": "Read G5 File",
       "type": "n8n-nodes-base.readWriteFile",
       "typeVersion": 1,
-      "position": [10512, 6544],
+      "position": [
+        10512,
+        6544
+      ],
       "id": "9cc326fa-1916-43b3-8e53-e84b8a202760"
     },
     {
@@ -480,7 +560,10 @@
       "name": "Send GDrive Link",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [10960, 6544],
+      "position": [
+        10960,
+        6544
+      ],
       "id": "bf51d709-5f4b-4427-b5d0-05b52bb8b932",
       "webhookId": "245deaa6-829f-4dfc-ae11-a1ebf84f9650",
       "credentials": {
@@ -496,7 +579,10 @@
       },
       "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
       "typeVersion": 1.1,
-      "position": [9456, 6720],
+      "position": [
+        9456,
+        6720
+      ],
       "id": "751f4eaa-6bd3-4b7c-b8a3-436cec3382a2",
       "name": "Google Gemini Chat Model1",
       "credentials": {
@@ -515,10 +601,77 @@
       },
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [10720, 6544],
+      "position": [
+        10720,
+        6544
+      ],
       "id": "6135b3ac-7f2b-477b-bb69-c7ad58c82433",
       "name": "Send a document1",
       "webhookId": "98f46075-a3d2-4ad8-883a-6d5bd076e6d3",
+      "credentials": {
+        "telegramApi": {
+          "id": "MGIrx6QXXkMEPydw",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "53eae782-411a-47a7-a3da-5355a6d1265c",
+              "leftValue": "={{ $json.result.text }}",
+              "rightValue": "GAMING",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            },
+            {
+              "id": "58cb0d47-1c21-4587-980b-53ecddbc5f47",
+              "leftValue": "={{ $json.result.text }}",
+              "rightValue": "GAMING5",
+              "operator": {
+                "type": "string",
+                "operation": "notContains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        9040,
+        6832
+      ],
+      "id": "c0825fb3-88b8-4744-a812-b8c1cc44fd18",
+      "name": "If GAMING Removed"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=Mode GAMING sudah dihapus.\n\nGunakan format terbaru:\n- <URL> untuk mode normal (3 momen)\n- <URL> GAMING5 [posisi] untuk kompilasi gaming 5 klip\n\nContoh:\nhttps://youtube.com/watch?v=xxx GAMING5 btmright",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        9264,
+        6640
+      ],
+      "id": "8bf2c8fd-2110-416c-8c0c-b3fbcd225641",
+      "name": "Send GAMING Removed",
+      "webhookId": "17826045-f5e8-4ba4-80b0-2dca953c8974",
       "credentials": {
         "telegramApi": {
           "id": "MGIrx6QXXkMEPydw",
@@ -599,7 +752,7 @@
       "main": [
         [
           {
-            "node": "Switch GAMING5",
+            "node": "If GAMING Removed",
             "type": "main",
             "index": 0
           }
@@ -813,6 +966,24 @@
           {
             "node": "AI Agent",
             "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If GAMING Removed": {
+      "main": [
+        [
+          {
+            "node": "Send GAMING Removed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Switch GAMING5",
+            "type": "main",
             "index": 0
           }
         ]
