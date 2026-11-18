@@ -318,7 +318,8 @@ def _whisper_subtitle(video_path: str, prefix: str,
 # ─────────────────────────────────────────
 
 def _process_single_clip_full(url: str, start_str: str, end_str: str,
-                              mode: str, clip_idx: int) -> dict:
+                              mode: str, clip_idx: int,
+                              use_watermark: bool = False) -> dict:
     """
     Download section LANGSUNG via --download-sections (CEPAT) + Whisper + Filter + Compress.
     Fallback ke full download + local cut jika --download-sections gagal.
@@ -342,7 +343,7 @@ def _process_single_clip_full(url: str, start_str: str, end_str: str,
         srt_file = _whisper_subtitle(source_h264, prefix)
 
         # Step 3: TikTok filter
-        tmp_merged = apply_tiktok_filter(source_h264, srt_file, mode, prefix)
+        tmp_merged = apply_tiktok_filter(source_h264, srt_file, mode, prefix, use_watermark=use_watermark)
 
         # Step 4: Compress if needed
         final_size = compress_to_target(tmp_merged, output)
@@ -361,7 +362,8 @@ def _process_single_clip_full(url: str, start_str: str, end_str: str,
                 print(f"🗑️ Hapus temp: {f}")
 
 
-def _cut_video_impl(url: str, segments: list[dict], mode: str = "normal") -> list[dict]:
+def _cut_video_impl(url: str, segments: list[dict], mode: str = "normal",
+                    use_watermark: bool = False) -> list[dict]:
     """
     Core implementation:
     Proses setiap klip secara sequential — download section spesifik per klip.
@@ -406,7 +408,7 @@ def _cut_video_impl(url: str, segments: list[dict], mode: str = "normal") -> lis
 
         try:
             result = _process_single_clip_full(
-                url, seg["start"], seg["end"], mode, i
+                url, seg["start"], seg["end"], mode, i, use_watermark=use_watermark
             )
             result["status"] = "success"
             results.append(result)
@@ -423,28 +425,30 @@ def _cut_video_impl(url: str, segments: list[dict], mode: str = "normal") -> lis
     return results
 
 
-def cut_video_task(url: str, start: str, end: str, mode: str = "normal"):
+def cut_video_task(url: str, start: str, end: str, mode: str = "normal",
+                   use_watermark: bool = False):
     """Single clip — kompatibilitas backward"""
     segments = [{"start": start, "end": end}]
-    results = _cut_video_impl(url, segments, mode)
+    results = _cut_video_impl(url, segments, mode, use_watermark=use_watermark)
     if results and results[0].get("status") == "error":
         return {"status": "error", "message": results[0].get("error", "Unknown error")}
     return results[0] if results else {"status": "error", "message": "No results"}
 
 
 # ─────────────────────────────────────────
-# GAMING COMPILATION — 5 klip → 1 video
+# GAMING5 — 5 klip gaming terpisah
 # ─────────────────────────────────────────
 
 def process_gaming_compilation(url: str, clips: list[dict],
-                                facecam_position: str = "btmleft") -> dict:
+                                facecam_position: str = "btmleft",
+                                use_watermark: bool = False) -> dict:
     """
-    Proses N klip gaming:
-    1. Parallel --download-sections (2 workers, CEPAT — kurangi burst agar tak kena 403)
-    2. Whisper SKIP — mode gaming compilation tanpa auto subtitle
+    Proses N klip gaming secara terpisah (tanpa digabung & tanpa transisi):
+    1. Sequential download section + retry pass (anti-burst 403)
+    2. Whisper SKIP — mode gaming tanpa auto subtitle
     3. Parallel gaming filter + encode (3 workers)
        Layout GAMING5: facecam 40% atas (1080×768) + gameplay 60% bawah (1080×1152)
-    4. Concat dengan xfade transitions → 1 video final
+    4. Simpan & compress tiap klip secara terpisah ke OUTPUT_DIR
     """
     n = len(clips)
     print(f"\n{'='*50}")
@@ -456,17 +460,14 @@ def process_gaming_compilation(url: str, clips: list[dict],
     except RuntimeError as e:
         print(f"🍪 {e}")
         raise
-    print(f"🎮 GAMING COMPILATION: {n} klip → 1 video")
-    print(f"📐 Facecam position: {facecam_position.upper()}")
+    print(f"🎮 GAMING5: {n} klip terpisah")
+    print(f"📐 Facecam position: {facecam_position.upper()} | Watermark: {'ON' if use_watermark else 'OFF'}")
     for i, seg in enumerate(clips):
         print(f"  Klip #{i+1}: {seg['start']} → {seg['end']}")
     print(f"{'='*50}\n")
 
     # Bebaskan disk dari cache run sebelumnya (video INI dilindungi).
     cleanup_full_video_cache(keep_url=url)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output = os.path.join(OUTPUT_DIR, f"gaming_compilation_{timestamp}.mp4")
 
     downloaded = {}   # idx → path
     filtered = {}     # idx → path
@@ -541,7 +542,7 @@ def process_gaming_compilation(url: str, clips: list[dict],
                 srt = srt_files.get(i)
                 fut = pool.submit(
                     apply_gaming_filter,
-                    downloaded[i], srt, facecam_position, prefix
+                    downloaded[i], srt, facecam_position, prefix, use_watermark
                 )
                 futures[fut] = i
 
@@ -559,26 +560,56 @@ def process_gaming_compilation(url: str, clips: list[dict],
             raise RuntimeError("Semua filter gagal — tidak bisa melanjutkan")
         print(f"  📊 {len(filtered)}/{len(downloaded)} berhasil difilter\n")
 
-        # ═══ STEP 4: Concat dengan transisi ═══
-        print("🔗 STEP 4: Concat dengan transisi...")
-        ordered_paths = [filtered[i] for i in sorted(filtered.keys())]
-        concat_with_transitions(ordered_paths, output, TRANSISI_SOUND)
+        # ═══ STEP 4: Simpan & compress tiap klip secara terpisah ═══
+        print("💾 STEP 4: Simpan tiap klip secara terpisah (tanpa concat/transisi)...")
+        clip_results = []
+        for i, seg in enumerate(clips):
+            if i not in filtered:
+                clip_results.append({
+                    "file": None,
+                    "size_mb": 0,
+                    "status": "error",
+                    "error": "Gagal download atau filter klip"
+                })
+                continue
 
-        final_size = os.path.getsize(output) / (1024 * 1024)
-        print(f"\n✅ KOMPILASI SELESAI: {output} ({final_size:.1f}MB)")
+            prefix = f"{seg['start'].replace(':', '')}_{i}"
+            clip_output = os.path.join(OUTPUT_DIR, f"final_gaming_{prefix}.mp4")
+            try:
+                if os.path.exists(clip_output):
+                    os.remove(clip_output)
+                final_size = compress_to_target(filtered[i], clip_output)
+                clip_results.append({
+                    "file": os.path.basename(clip_output),
+                    "size_mb": round(final_size, 1),
+                    "status": "success"
+                })
+            except Exception as e:
+                print(f"  ❌ Klip #{i+1} simpan GAGAL: {e}")
+                clip_results.append({
+                    "file": None,
+                    "size_mb": 0,
+                    "status": "error",
+                    "error": str(e)
+                })
+
+        success_count = sum(1 for r in clip_results if r["status"] == "success")
+        fail_count = n - success_count
+        print(f"\n✅ GAMING5 SELESAI: {success_count}/{n} klip berhasil disimpan")
 
         return {
-            "status": "success",
-            "file": os.path.basename(output),
-            "size_mb": round(final_size, 1),
-            "clips_processed": len(filtered),
-            "total_clips": n,
-            "facecam_position": facecam_position
+            "status": "done",
+            "total": n,
+            "success": success_count,
+            "failed": fail_count,
+            "facecam_position": facecam_position,
+            "use_watermark": use_watermark,
+            "clips": clip_results
         }
 
     finally:
-        # Cleanup temp files (kecuali output final)
+        # Cleanup temp files
         for f in temp_files:
-            if f and os.path.exists(f) and f != output:
+            if f and os.path.exists(f):
                 os.remove(f)
                 print(f"🗑️ Hapus temp: {f}")

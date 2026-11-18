@@ -10,7 +10,7 @@ import platform
 
 IS_WINDOWS = platform.system() == "Windows"
 TMP_DIR = tempfile.gettempdir()
-OUTPUT_DIR = r"C:\Users\RWID\Downloads\clip"
+OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "clip")
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -19,7 +19,7 @@ ASSETS_DIR = os.path.join(PROJECT_ROOT, "assets")
 
 COOKIES_PATH = os.path.join(PROJECT_ROOT, "youtube_cookies.txt")
 TRANSISI_SOUND = os.path.join(ASSETS_DIR, "sounds", "transisi_sound.mpeg")
-WATERMARK_PATH = os.path.join(ASSETS_DIR, "images", "watermark.png")
+WATERMARK_PATH = os.path.join(ASSETS_DIR, "images", "new-wm.png")
 
 # ─────────────────────────────────────────
 # FULL VIDEO CACHE CLEANUP — kontrol pemakaian disk

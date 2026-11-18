@@ -121,13 +121,14 @@ def get_facecam_crop(video_path: str, position: str = "btmleft",
 
 
 def apply_gaming_filter(video_path: str, srt_file: str | None,
-                        facecam_position: str, prefix: str) -> str:
+                        facecam_position: str, prefix: str,
+                        use_watermark: bool = False) -> str:
     """
     Gaming compilation layout (GAMING5):
     - Output portrait 1080×1920
     - Facecam 40% bagian atas: 1080×768, crop mengikuti auto deteksi wajah
     - Gameplay 60% bagian bawah: 1080×1152
-    - Watermark 150px di tengah hasil akhir (jika watermark.png tersedia)
+    - Watermark full-frame overlay (jika new-wm.png tersedia)
     - Subtitle dibakar di atas komposit (jika ada)
 
     MINIMAL PROCESSING: light denoise → high-quality scale → light sharpen.
@@ -155,10 +156,10 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
         srt_escaped = srt_file.replace('\\', '/').replace(':', '\\:')
         sub_chain = f"ass='{srt_escaped}'"
 
-    # Cek apakah watermark tersedia
-    wm_available = os.path.exists(WATERMARK_PATH)
+    # Cek apakah watermark diaktifkan dan tersedia
+    wm_available = use_watermark and os.path.exists(WATERMARK_PATH)
     if wm_available:
-        print(f"[watermark] {WATERMARK_PATH} (150px, tengah hasil akhir)")
+        print(f"[watermark] {WATERMARK_PATH} (full-frame overlay)")
 
     # Build filter_complex: facecam 40% atas + gameplay 60% bawah.
     video_filter = (
@@ -178,11 +179,10 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
         f"[top][bottom]vstack=inputs=2[stacked];"
     )
 
-    # Watermark: scale 150px → overlay tepat di tengah hasil akhir 1080×1920.
+    # Watermark: new-wm.png sudah berukuran 1080×1920 (posisi & ukuran sudah pas), langsung overlay.
     if wm_available:
         video_filter += (
-            f"[1:v]scale=150:-1:flags=lanczos,setsar=1[wm];"
-            f"[stacked][wm]overlay=(W-w)/2:(H-h)/2[with_wm];"
+            f"[stacked][1:v]overlay=0:0[with_wm];"
             f"[with_wm]fps=30,setpts=PTS-STARTPTS[comp_cfr];"
         )
     else:
@@ -217,9 +217,10 @@ def apply_gaming_filter(video_path: str, srt_file: str | None,
 
 
 def apply_tiktok_filter(video_path: str, srt_file: str | None,
-                        mode: str, prefix: str) -> str:
+                        mode: str, prefix: str,
+                        use_watermark: bool = False) -> str:
     """
-    Apply TikTok filter normal + subtitle burn-in.
+    Apply TikTok filter normal + subtitle burn-in (+ opsional watermark overlay).
     `mode` dipertahankan untuk kompatibilitas lama; layout gaming lama sudah dihapus.
     Return path ke file hasil filter (tmp_merged).
     """
@@ -230,12 +231,17 @@ def apply_tiktok_filter(video_path: str, srt_file: str | None,
         srt_escaped = srt_file.replace('\\', '/').replace(':', '\\:')
         sub_chain = f"ass='{srt_escaped}'"
 
+    wm_available = use_watermark and os.path.exists(WATERMARK_PATH)
+    if wm_available:
+        print(f"[watermark] {WATERMARK_PATH} (full-frame overlay)")
+
     if mode.lower() != "normal":
         print(f"[tiktok] Mode {mode} sudah tidak didukung; pakai layout NORMAL ({prefix})")
 
     print(f"[tiktok] Mode NORMAL ({prefix}) - blur background + foreground + subtitle...")
     # Foreground anti-buram: denoise ringan → scale lanczos → unsharp + cas.
     # Kompensasi upscale sumber (720p/360p) ke 1080×1080.
+    comp_out = "[comp]" if wm_available else "[v]"
     if srt_file:
         video_filter = (
             "[0:v]split[orig_raw][bg];"
@@ -247,7 +253,7 @@ def apply_tiktok_filter(video_path: str, srt_file: str | None,
             "cas=0.3,"
             "setsar=1[scaled];"
             f"[scaled]{sub_chain}[fg];"
-            "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
+            f"[blurred][fg]overlay=(W-w)/2:(H-h)/2{comp_out}"
         )
     else:
         video_filter = (
@@ -259,17 +265,23 @@ def apply_tiktok_filter(video_path: str, srt_file: str | None,
             "unsharp=5:5:1.0:5:5:0.5,"
             "cas=0.3,"
             "setsar=1[fg];"
-            "[blurred][fg]overlay=(W-w)/2:(H-h)/2[v]"
+            f"[blurred][fg]overlay=(W-w)/2:(H-h)/2{comp_out}"
         )
 
+    if wm_available:
+        video_filter += ";[comp][1:v]overlay=0:0[v]"
+
     # TikTok filter jalan SEQUENTIAL (satu klip per waktu) → biarkan pakai semua core.
-    subprocess.run([
-        FFMPEG_EXE, "-i", video_path,
+    cmd = [FFMPEG_EXE, "-i", video_path]
+    if wm_available:
+        cmd += ["-i", WATERMARK_PATH]
+    cmd += [
         "-filter_complex", video_filter,
         "-map", "[v]", "-map", "0:a?",
         "-c:v", "libx264", "-crf", "20", "-preset", "fast", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",
         tmp_merged, "-y"
-    ], check=True)
+    ]
+    subprocess.run(cmd, check=True)
 
     return tmp_merged

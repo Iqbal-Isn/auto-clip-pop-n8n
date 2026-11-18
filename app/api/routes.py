@@ -66,7 +66,7 @@ async def get_transcript(url: str, range: str = ""):
 
 @router.post("/cut")
 async def cut_video(request: ClipRequest):
-    result = cut_video_task(request.url, request.start, request.end, request.mode)
+    result = cut_video_task(request.url, request.start, request.end, request.mode, request.use_watermark)
     return result
 
 
@@ -92,7 +92,7 @@ async def cut_video_batch(request: BatchClipRequest):
       ]
     }
     """
-    results = _cut_video_impl(request.url, request.clips, request.mode)
+    results = _cut_video_impl(request.url, request.clips, request.mode, request.use_watermark)
 
     success_count = sum(1 for r in results if r.get("status") == "success")
     fail_count = sum(1 for r in results if r.get("status") == "error")
@@ -109,9 +109,9 @@ async def cut_video_batch(request: BatchClipRequest):
 @router.post("/cut-gaming-compilation")
 async def cut_gaming_compilation(request: GamingCompilationRequest):
     """
-    Endpoint kompilasi gaming GAMING5: N klip → 1 video dengan transisi.
+    Endpoint gaming GAMING5: N klip gaming terpisah (tanpa digabung & tanpa transisi).
     Layout: facecam 40% atas (1080×768) + gameplay 60% bawah (1080×1152),
-    watermark 150px di tengah hasil akhir jika assets/images/watermark.png ada.
+    watermark overlay jika assets/images/new-wm.png ada.
     Request body:
     {
       "url": "https://youtube.com/watch?v=xxx",
@@ -123,26 +123,30 @@ async def cut_gaming_compilation(request: GamingCompilationRequest):
     }
     Response:
     {
-      "status": "success",
-      "file": "gaming_compilation_20260805_143025.mp4",
-      "size_mb": 45.2,
-      "clips_processed": 5,
-      "total_clips": 5,
-      "facecam_position": "btmleft"
+      "status": "done",
+      "total": 5,
+      "success": 5,
+      "failed": 0,
+      "facecam_position": "btmleft",
+      "clips": [
+        {"file": "final_gaming_000130_0.mp4", "size_mb": 6.5, "status": "success"},
+        ...
+      ]
     }
     """
     try:
         result = process_gaming_compilation(
-            request.url, request.clips, request.facecam_position
+            request.url, request.clips, request.facecam_position, request.use_watermark
         )
         return result
     except Exception as e:
-        print(f"❌ Gaming compilation GAGAL: {e}")
+        print(f"❌ Gaming5 GAGAL: {e}")
+        total = len(request.clips) if request.clips else 0
         return {
             "status": "error",
-            "file": None,
-            "size_mb": 0,
-            "clips_processed": 0,
-            "total_clips": len(request.clips) if request.clips else 0,
+            "total": total,
+            "success": 0,
+            "failed": total,
+            "clips": [],
             "error": str(e)
         }
